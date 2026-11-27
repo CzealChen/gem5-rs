@@ -30,7 +30,7 @@ pub struct Request {
     pub operation: Operation,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Fault {
     ZeroSize,
     AddressOverflow,
@@ -467,10 +467,10 @@ impl<'a> Machine<'a> {
         let mut events = 0;
         let mut tick = self.queue.now();
         let stop = loop {
-            if self.in_flight == 0 {
-                if let Some(stop) = self.stopping.take() {
-                    break stop;
-                }
+            if self.in_flight == 0
+                && let Some(stop) = self.stopping.take()
+            {
+                break stop;
             }
             if self.queue.is_empty() {
                 debug_assert!(self.live.is_empty());

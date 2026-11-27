@@ -9,7 +9,11 @@ description = "Typed board assembly for the gem5-rs simulator"
 requires-python = ">=3.13"
 
 [dependency-groups]
-dev = ["maturin==1.15.0", "mypy==2.3.1"]
+dev = [
+    "maturin==1.15.0",
+    "mypy==2.3.1",
+    "ruff==0.16.8",
+]
 
 [tool.maturin]
 python-source = "python"
@@ -19,3 +23,7 @@ features = ["python"]
 [tool.mypy]
 strict = true
 files = ["python", "tests/typing/check.py", "tests/typing/valid.py"]
+
+[tool.ruff.lint.per-file-ignores]
+# Malformed native result values share a single decoding error contract.
+"python/gem5rs/_wire.py" = ["TRY004"]

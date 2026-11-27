@@ -1,6 +1,8 @@
+use super::{ConfigError, ContextSnafu, DecodeSnafu, ImageSnafu};
 use crate::{elf, memory};
 use serde::Deserialize;
 use serde_json::value::Value;
+use snafu::ResultExt;
 use std::{collections::BTreeMap, ops::Range};
 
 pub(super) struct Graph {
@@ -91,27 +93,28 @@ enum Side {
 
 type Port = (usize, u64);
 
-pub(super) struct Plan<'a> {
-    pub sources: Vec<Requestor<'a>>,
+pub(super) struct Plan {
+    pub sources: Vec<Requestor>,
     pub routes: Vec<Mount>,
 }
 
-pub(super) struct Requestor<'a> {
+pub(super) struct Requestor {
     pub id: usize,
-    pub name: &'a str,
+    pub name: String,
     pub label: String,
-    pub source: Source<'a>,
+    pub source: Source,
 }
 
-pub(super) enum Source<'a> {
+pub(super) enum Source {
     Traffic(Vec<Scheduled>),
     Core {
-        image: elf::Image<'a>,
+        image: elf::Image,
         stack_pointer: u64,
         cycle: u64,
     },
 }
 
+#[derive(Clone)]
 pub(super) struct Scheduled {
     pub at: u64,
     pub id: u64,
@@ -126,12 +129,14 @@ pub(super) struct Mount {
 }
 
 impl Graph {
-    pub fn parse(json: &str) -> Result<Self, String> {
+    pub fn parse(json: &str) -> Result<Self, ConfigError> {
         let RawGraph {
             graph_id,
             nodes,
             connections,
-        } = serde_json::from_str(json).map_err(|err| format!("board graph: {err}"))?;
+        } = serde_json::from_str(json).context(DecodeSnafu {
+            location: "board graph",
+        })?;
         if graph_id == 0 {
             return Err("graph_id must be positive".into());
         }
@@ -144,16 +149,19 @@ impl Graph {
                     .and_then(|fields| fields.remove("name"))
                     .and_then(|value| serde_json::from_value::<String>(value).ok())
                     .ok_or_else(|| format!("nodes[{id}].name: expected a string"))?;
-                let model = serde_json::from_value(raw)
-                    .map_err(|err| format!("{name} (nodes[{id}]): {err}"))?;
+                let model = serde_json::from_value(raw).with_context(|_| DecodeSnafu {
+                    location: format!("{name} (nodes[{id}])"),
+                })?;
                 Ok(Node { name, model })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, ConfigError>>()?;
         let connections = connections
             .into_iter()
             .enumerate()
             .map(|(i, raw)| {
-                serde_json::from_value(raw).map_err(|err| format!("connections[{i}]: {err}"))
+                serde_json::from_value(raw).with_context(|_| DecodeSnafu {
+                    location: format!("connections[{i}]"),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
@@ -201,11 +209,14 @@ impl Graph {
         Ok((id, endpoint.port))
     }
 
-    pub fn plan(&self) -> Result<Plan<'_>, String> {
+    pub fn plan(&self) -> Result<Plan, ConfigError> {
         let mut outgoing = BTreeMap::new();
         let mut incoming = BTreeMap::new();
         for (i, edge) in self.connections.iter().enumerate() {
-            let at = |err| format!("connections[{i}]: {err}");
+            let at = |message: String| ConfigError::Context {
+                location: format!("connections[{i}]"),
+                source: Box::new(message.into()),
+            };
             let src = self.endpoint(&edge.source, Side::Output).map_err(at)?;
             let dst = self.endpoint(&edge.target, Side::Input).map_err(at)?;
             if outgoing.insert(src, dst).is_some() {
@@ -233,11 +244,11 @@ impl Graph {
             {
                 node.check_router(*inputs, ranges, priority)?;
                 if let Some(previous) = router.replace(id) {
-                    return Err(format!(
+                    return Err(ConfigError::from(format!(
                         "{} and {}: a board uses one router",
                         self.nodes[previous].port(Side::Input, 0),
                         node.port(Side::Input, 0)
-                    ));
+                    )));
                 }
             } else if node.is_requestor() {
                 requestors.push(id);
@@ -245,7 +256,10 @@ impl Graph {
             for (side, edges) in [(Side::Output, &outgoing), (Side::Input, &incoming)] {
                 for index in 0..node.port_count(side) {
                     if !edges.contains_key(&(id, index)) {
-                        return Err(format!("{} is unconnected", node.port(side, index)));
+                        return Err(ConfigError::from(format!(
+                            "{} is unconnected",
+                            node.port(side, index)
+                        )));
                     }
                 }
             }
@@ -263,12 +277,12 @@ impl Graph {
             for &id in &requestors {
                 let dst = outgoing[&(id, 0)];
                 if dst.0 != rid {
-                    return Err(format!(
+                    return Err(ConfigError::from(format!(
                         "{} connects to {}; all requestors on this board must enter {}",
                         self.nodes[id].port(Side::Output, 0),
                         self.label(dst, Side::Input),
                         router.name
-                    ));
+                    )));
                 }
             }
             requestors = priority
@@ -280,20 +294,20 @@ impl Graph {
                 let label = router.port(Side::Output, index as u64);
                 let target = &self.nodes[dst.0];
                 if dst.0 == rid {
-                    return Err(format!(
+                    return Err(ConfigError::from(format!(
                         "{label} connects to {}; router outputs must connect to targets",
                         target.port(Side::Input, dst.1)
-                    ));
+                    )));
                 }
                 routes.push(target.mount(Some((window, &label)))?);
             }
         } else if let Some(&id) = requestors.first() {
             if let Some(&other) = requestors.get(1) {
-                return Err(format!(
+                return Err(ConfigError::from(format!(
                     "{} and {}: multiple requestors must connect through a shared router",
                     self.nodes[id].port(Side::Output, 0),
                     self.nodes[other].port(Side::Output, 0)
-                ));
+                )));
             }
             routes.push(self.nodes[outgoing[&(id, 0)].0].mount(None)?);
         }
@@ -310,8 +324,11 @@ impl Graph {
                             .iter()
                             .enumerate()
                             .map(|(i, op)| {
-                                Scheduled::parse(i, op)
-                                    .map_err(|err| format!("{label} operations[{i}]: {err}"))
+                                Scheduled::parse(i, op).map_err(Box::new).with_context(|_| {
+                                    ContextSnafu {
+                                        location: format!("{label} operations[{i}]"),
+                                    }
+                                })
                             })
                             .collect::<Result<_, _>>()?,
                     ),
@@ -321,14 +338,21 @@ impl Graph {
                         cycle,
                     } => {
                         if std::mem::replace(&mut has_core, true) {
-                            return Err(format!("{label}: a board uses one RV64 core"));
+                            return Err(ConfigError::from(format!(
+                                "{label}: a board uses one RV64 core"
+                            )));
                         }
                         if *cycle == 0 {
-                            return Err(format!("{label}: cycle must be positive"));
+                            return Err(ConfigError::from(format!(
+                                "{label}: cycle must be positive"
+                            )));
                         }
                         Source::Core {
                             image: image(elf, *stack_pointer, &routes)
-                                .map_err(|err| format!("{label}: {err}"))?,
+                                .map_err(Box::new)
+                                .with_context(|_| ContextSnafu {
+                                    location: label.clone(),
+                                })?,
                             stack_pointer: *stack_pointer,
                             cycle: *cycle,
                         }
@@ -337,12 +361,12 @@ impl Graph {
                 };
                 Ok(Requestor {
                     id,
-                    name: &node.name,
+                    name: node.name.clone(),
                     label,
                     source,
                 })
             })
-            .collect::<Result<_, String>>()?;
+            .collect::<Result<_, ConfigError>>()?;
         Ok(Plan { sources, routes })
     }
 
@@ -513,8 +537,10 @@ impl Node {
 }
 
 impl Scheduled {
-    fn parse(id: usize, raw: &Value) -> Result<Self, String> {
-        let op: Operation = serde_json::from_value(raw.clone()).map_err(|err| err.to_string())?;
+    fn parse(id: usize, raw: &Value) -> Result<Self, ConfigError> {
+        let op: Operation = serde_json::from_value(raw.clone()).context(DecodeSnafu {
+            location: "operation",
+        })?;
         let (at, address, operation) = match op {
             Operation::Read {
                 at,
@@ -549,7 +575,7 @@ fn address_range(base: u64, size: u64) -> Result<Range<u64>, String> {
     Ok(base..end)
 }
 
-fn image<'a>(bytes: &'a [u8], sp: u64, routes: &[Mount]) -> Result<elf::Image<'a>, String> {
+fn image(bytes: &[u8], sp: u64, routes: &[Mount]) -> Result<elf::Image, ConfigError> {
     const STACK_ALIGNMENT: u64 = 16;
     let bottom = sp
         .checked_sub(STACK_ALIGNMENT)
@@ -563,6 +589,7 @@ fn image<'a>(bytes: &'a [u8], sp: u64, routes: &[Mount]) -> Result<elf::Image<'a
                 && sp <= mount.range.end
         })
         .ok_or("stack_pointer must have stack space in connected RAM")?;
-    elf::load(bytes, ram.range.start..sp, STACK_ALIGNMENT)
-        .map_err(|err| format!("{}: {err}", ram.label))
+    elf::load_at(bytes, ram.range.clone(), sp, STACK_ALIGNMENT).with_context(|_| ImageSnafu {
+        location: ram.label.clone(),
+    })
 }

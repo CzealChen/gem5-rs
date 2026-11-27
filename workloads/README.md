@@ -5,7 +5,7 @@
 ```sh
 ./workloads/build.sh
 python tools/spike_trace.py workloads/build/rv64i.elf workloads/build/loop.elf
-python -B -m unittest workloads.test_spike_trace
+GEM5RS_ELF_DIR=workloads/build python -B -m unittest workloads.test_spike_trace
 mypy --strict -m tools.spike_trace -m workloads.test_spike_trace
 ```
 

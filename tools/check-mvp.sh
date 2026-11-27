@@ -8,7 +8,13 @@ work=$(cd -- "$work" && pwd -P)
 unset PYTHONPATH PYTHONHOME PYTHONOPTIMIZE MYPYPATH
 
 cd "$root"
-cargo test --locked
+cargo fmt --all -- --check
+cargo clippy --locked --all-features --all-targets -- -D warnings
+cargo nextest run --locked --all-features --all-targets
+cargo test --locked --all-features --doc
+ruff check python tests tools workloads
+ruff format --check python tests tools workloads
+mypy --strict -m tools.spike_trace -m workloads.test_spike_trace
 py="${VIRTUAL_ENV:?Run inside devenv shell}/bin/python"
 maturin build --locked --interpreter "$py" --out "$work/dist"
 wheels=("$work"/dist/*.whl)
@@ -30,4 +36,5 @@ mypy --strict --python-executable "$py" check.py installed.py traffic.py bare_me
 "$py" -E -s traffic.py
 
 bash "$root/workloads/build.sh" "$work/elf"
+(cd "$root" && GEM5RS_ELF_DIR="$work/elf" "$py" -E -s -m unittest workloads.test_spike_trace)
 "$py" -E -s bare_metal.py "$work/elf"

@@ -1,6 +1,7 @@
 """Typed assembly and execution of gem5-rs boards."""
 
 from ._board import Board, Machine
+from ._native import ConfigurationError, SimulationError
 from ._types import (
     AccessKind,
     Address,
@@ -35,6 +36,7 @@ __all__ = [
     "AddressRange",
     "Board",
     "Commit",
+    "ConfigurationError",
     "DualBankRam",
     "Exit",
     "Fault",
@@ -42,13 +44,14 @@ __all__ = [
     "Machine",
     "Read",
     "RegisterWrite",
-    "RequestorHandle",
     "RequestOut",
+    "RequestorHandle",
     "Router",
     "RouterHandle",
     "RunLimit",
     "RunResult",
     "Rv64Core",
+    "SimulationError",
     "Statistics",
     "StopReason",
     "TargetHandle",

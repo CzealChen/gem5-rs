@@ -42,9 +42,10 @@ def experiment() -> tuple[int, ...]:
 
 在仓库根目录运行 `devenv shell -- just check-mvp`；已进入 `devenv shell` 时运行 `just check-mvp`。进入环境时，uv 根据 `uv.lock` 同步开发依赖。检查顺序如下：
 
-- `cargo test --locked`：事件、事务和 ISA 的独立行为用例通过。
+- `cargo fmt` 检查 Rust 格式；Clippy 对全部 feature 和 target 将警告视为错误；cargo-nextest 运行事件、事务和 ISA 测试，Cargo 另行运行文档测试。
+- Ruff 检查 Python 源码与格式；`mypy --strict` 检查 Spike 轨迹工具及其测试。
 - `maturin build` 后用 `uv pip install --target` 将本次 wheel 安装到临时目录，在该目录用项目环境运行严格类型正例、指定错误反例与绑定运行测试。上面的单源示例、双源争用和适配器替换都经公开装配接口运行。
-- 重建两个 ELF，运行 Python 装配的机器，输出退出原因、提交数、最终 tick、访存统计和首个轨迹差异（如有）。静态期望、手算依据和复现命令随测试一起交付。
+- 在临时目录重建两个 ELF，用同一对 ELF 运行 Spike 轨迹单测及 Python 装配的机器，输出退出原因、提交数、最终 tick、访存统计和首个轨迹差异（如有）。静态期望、手算依据和复现命令随测试一起交付。
 
 流量实验中，两个源在 tick 0 写入各自 bank、tick 21 读取：单服务槽依次在 tick 10、20 完成写入，tick 31、41 完成读取；双 bank 在 tick 10 完成两次写入、tick 31 完成两次读取，两者均读回 `A`、`B`。
 

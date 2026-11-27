@@ -11,6 +11,9 @@ crate-type = ["rlib", "cdylib"]
 python = ["dep:pyo3"]
 
 [dependencies]
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std", "unaligned"] }
 pyo3 = { version = "0.28.3", optional = true }
+riscv-isa = "=0.3.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+snafu = "0.9"

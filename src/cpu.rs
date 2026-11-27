@@ -3,13 +3,13 @@
 use crate::memory::{Operation, ResponseResult, Source, SourceAction, SourceEvent};
 use crate::riscv::{self, Access, Pending, Step};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RegisterWrite {
     pub register: u64,
     pub value: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Commit {
     pub at: u64,
     pub pc: u64,
@@ -136,14 +136,15 @@ impl Source for Cpu {
                 let (response, target_fault) = isa_response(&response.result);
                 riscv::finish_fetch(self.pc, response)
                     .map_err(|fault| isa_fault(fault, target_fault))
-                    .and_then(|instruction| {
-                        let next_at = at.checked_add(self.cycle).ok_or_else(|| Fault {
-                            reason: format!("execution tick overflow: {at} + {}", self.cycle),
-                            pc: self.pc,
-                            addr: None,
-                        })?;
+                    .map(|instruction| {
+                        let Some(next_at) = at.checked_add(self.cycle) else {
+                            return SourceAction::Stop(format!(
+                                "execution tick overflow: {at} + {}",
+                                self.cycle
+                            ));
+                        };
                         self.phase = Phase::Execute(instruction);
-                        Ok(SourceAction::WakeAt(next_at))
+                        SourceAction::WakeAt(next_at)
                     })
             }
             (Phase::Data(id, pending), SourceEvent::Response(response)) if id == response.id => {
@@ -405,18 +406,18 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_execution_tick_reports_the_fault_at_fetch_delivery() {
+    fn overflowing_execution_tick_stops_at_fetch_delivery() {
         let mut cpu = Cpu::new(0, 32, u64::MAX);
         let result = program(&mut cpu, PROGRAM, 3, LIMITS);
         assert_eq!(result.tick, 3);
         assert_eq!(
-            cpu.fault(),
-            Some(&Fault {
-                pc: 0,
-                addr: None,
+            result.stop,
+            StopReason::SourceStopped {
+                source: 0,
                 reason: "execution tick overflow: 3 + 18446744073709551615".into(),
-            })
+            }
         );
+        assert_eq!(cpu.fault(), None);
         assert!(cpu.commits().is_empty());
     }
 }

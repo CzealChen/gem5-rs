@@ -23,6 +23,7 @@ in
   packages = [
     pkgs.git
     pkgs.just
+    pkgs.cargo-nextest
     rv64Tools
     pkgs.spike
     pkgs.dtc # Spike compiles its device tree at startup.

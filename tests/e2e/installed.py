@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import pickle
 import sys
 from importlib import resources
 from pathlib import Path
@@ -21,7 +22,14 @@ def main() -> None:
     files = resources.files(gem5rs)
     for name in ("py.typed", "_native.pyi"):
         assert files.joinpath(name).is_file(), f"Wheel is missing gem5rs/{name}"
-    print(f"Wheel verified: interpreter={sys.executable} package={package} native={spec.origin}")
+    for cls in (gem5rs.ConfigurationError, gem5rs.SimulationError):
+        assert cls.__module__ == "gem5rs._native", cls.__module__
+        assert pickle.loads(pickle.dumps(cls)) is cls
+        restored = pickle.loads(pickle.dumps(cls("diagnostic")))
+        assert type(restored) is cls and restored.args == ("diagnostic",)
+    print(
+        f"Wheel verified: interpreter={sys.executable} package={package} native={spec.origin}"
+    )
 
 
 if __name__ == "__main__":

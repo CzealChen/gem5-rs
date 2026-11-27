@@ -46,7 +46,7 @@ fn two_sources() -> Value {
 #[test]
 fn ingress_priority_controls_read_visibility_and_backpressure() {
     let board = two_sources();
-    assert_eq!(validate(&board.to_string()), Ok(()));
+    validate(&board.to_string()).unwrap();
     let result = run_board(&board, 100);
     assert_eq!(result["stop_reason"], "idle");
     assert_eq!(result["final_tick"], 20);
@@ -134,14 +134,15 @@ fn graph_errors_identify_the_port() {
         let mut board = valid.clone();
         board["connections"] = json!(connections);
         let graph = board.to_string();
-        assert!(validate(&graph).unwrap_err().contains(expected));
-        assert!(run(&graph, 100).unwrap_err().contains(expected));
+        assert!(validate(&graph).unwrap_err().to_string().contains(expected));
+        assert!(run(&graph, 100).unwrap_err().to_string().contains(expected));
     }
     let mut cross = valid.clone();
     cross["connections"][0]["source"]["graph_id"] = json!(8);
     assert!(
         validate(&cross.to_string())
             .unwrap_err()
+            .to_string()
             .contains("reader.requests belongs to graph 8")
     );
 
@@ -150,6 +151,7 @@ fn graph_errors_identify_the_port() {
     assert!(
         validate(&priority.to_string())
             .unwrap_err()
+            .to_string()
             .contains("bus.inputs[0]: duplicate ingress")
     );
 }
@@ -186,6 +188,7 @@ fn router_delivers_requests_to_each_declared_window() {
     assert!(
         validate(&overlap.to_string())
             .unwrap_err()
+            .to_string()
             .contains("bus.outputs[1] overlaps bus.outputs[0]")
     );
     let mut mismatch = board;
@@ -193,6 +196,7 @@ fn router_delivers_requests_to_each_declared_window() {
     assert!(
         validate(&mismatch.to_string())
             .unwrap_err()
+            .to_string()
             .contains("bus.outputs[0] range must match right.input")
     );
 }
@@ -211,6 +215,7 @@ fn disjoint_paths_require_a_shared_router() {
     assert!(
         validate(&board.to_string())
             .unwrap_err()
+            .to_string()
             .contains("left.requests and right.requests")
     );
 }
@@ -286,6 +291,19 @@ fn elf_boot_commits_the_exit_store() {
     assert_eq!(commits[2]["at"], result["transactions"][3]["completed_at"]);
     assert_eq!(result["stats"]["fetches"], 3);
     assert_eq!(result["stats"]["writes"], 1);
+}
+
+#[test]
+fn executes_load_segment_above_stack_pointer() {
+    let mut board = cpu_board(&[0x20000193, 0x0021b023]);
+    board["nodes"][0]["stack_pointer"] = json!(0x110);
+    let mut elf = rv64_elf(&[0x20000193, 0x0021b023]);
+    for field in [24, 80] {
+        elf[field..field + 8].copy_from_slice(&0x120u64.to_le_bytes());
+    }
+    board["nodes"][0]["elf"] = json!(elf);
+    let result = run_board(&board, 100);
+    assert_eq!(result["exit_code"], 0x110);
 }
 
 #[test]

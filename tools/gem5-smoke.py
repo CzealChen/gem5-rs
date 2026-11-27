@@ -1,7 +1,6 @@
 import m5
 from m5.objects import Root
 
-
 root = Root(full_system=False)
 m5.instantiate()
 start = m5.curTick()

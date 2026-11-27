@@ -115,150 +115,123 @@ pub fn finish_fetch(pc: u64, response: Response<'_>) -> Result<u32, Fault> {
 
 pub fn execute(pc: u64, instruction: u32, registers: &[u64; 32]) -> Result<Step, Fault> {
     fetch_address(pc)?;
-    let inst = u64::from(instruction);
-    let opcode = inst & 0x7f;
-    let rd = ((inst >> 7) & 31) as usize;
-    let funct3 = (inst >> 12) & 7;
-    let rs1 = ((inst >> 15) & 31) as usize;
-    let rs2 = ((inst >> 20) & 31) as usize;
-    let funct7 = inst >> 25;
-    let reg = |index| if index == 0 { 0 } else { registers[index] };
-    let (lhs, rhs) = (reg(rs1), reg(rs2));
-    let i_imm = sign_extend(inst >> 20, 12);
-    let illegal = Fault {
-        pc,
-        reason: FaultReason::IllegalInstruction(instruction),
-        address: None,
+    use riscv_isa::{Instruction::*, Target, Xlen, decode_full};
+
+    let target = Target {
+        xlen: Xlen::Rv64,
+        ..Target::default()
     };
+    let reg = |index: u32| {
+        if index == 0 {
+            0
+        } else {
+            registers[index as usize]
+        }
+    };
+    let word = |value: u32| value as i32 as u64;
     let mut commit = Commit {
         pc,
         instruction,
         next_pc: pc.wrapping_add(4),
         register_write: None,
     };
-    let value = match opcode {
-        0x37 => Some(sign_extend(inst & 0xffff_f000, 32)), // LUI
-        0x17 => Some(pc.wrapping_add(sign_extend(inst & 0xffff_f000, 32))), // AUIPC
-        0x6f => {
-            let offset = (inst >> 31) << 20
-                | (inst & 0x000f_f000)
-                | ((inst >> 20) & 1) << 11
-                | ((inst >> 21) & 0x3ff) << 1;
+    let load = |rd, rs1, offset: i32, size, signed, commit| {
+        let address = reg(rs1).wrapping_add(offset as u64);
+        check_alignment(pc, address, size, AccessKind::Read)?;
+        Ok(Step::Memory(Pending {
+            access: Access::Read { address, size },
+            commit,
+            load_rd: rd as usize,
+            signed,
+        }))
+    };
+    let store = |rs1, rs2, offset: i32, size, commit| {
+        let address = reg(rs1).wrapping_add(offset as u64);
+        check_alignment(pc, address, size, AccessKind::Write)?;
+        Ok(Step::Memory(Pending {
+            access: Access::Write {
+                address,
+                data: reg(rs2).to_le_bytes()[..size].to_vec(),
+            },
+            commit,
+            load_rd: 0,
+            signed: false,
+        }))
+    };
+    let mut branch = |taken, offset: i32| {
+        if taken {
+            commit.next_pc = pc.wrapping_add(offset as u64);
+        }
+        None
+    };
+    let write = match decode_full(instruction, &target) {
+        // The decoder supplies an unshifted U immediate and signed byte offsets.
+        LUI { rd, imm } => Some((rd, word(imm << 12))),
+        AUIPC { rd, imm } => Some((rd, pc.wrapping_add(word(imm << 12)))),
+        JAL { rd, offset } => {
             let link = commit.next_pc;
-            commit.next_pc = pc.wrapping_add(sign_extend(offset, 21));
-            Some(link)
+            commit.next_pc = pc.wrapping_add(offset as u64);
+            Some((rd, link))
         }
-        0x67 if funct3 == 0 => {
+        JALR { rd, rs1, offset } => {
             let link = commit.next_pc;
-            commit.next_pc = lhs.wrapping_add(i_imm) & !1;
-            Some(link)
+            commit.next_pc = reg(rs1).wrapping_add(offset as u64) & !1;
+            Some((rd, link))
         }
-        0x63 => {
-            let taken = match funct3 {
-                0 => lhs == rhs,
-                1 => lhs != rhs,
-                4 => (lhs as i64) < (rhs as i64),
-                5 => (lhs as i64) >= (rhs as i64),
-                6 => lhs < rhs,
-                7 => lhs >= rhs,
-                _ => return Err(illegal),
-            };
-            if taken {
-                let offset = (inst >> 31) << 12
-                    | ((inst >> 7) & 1) << 11
-                    | ((inst >> 25) & 0x3f) << 5
-                    | ((inst >> 8) & 0xf) << 1;
-                commit.next_pc = pc.wrapping_add(sign_extend(offset, 13));
-            }
-            None
-        }
-        0x03 => {
-            let (size, signed) = match funct3 {
-                0..=3 => (1 << funct3, true),
-                4..=6 => (1 << (funct3 - 4), false),
-                _ => return Err(illegal),
-            };
-            let address = lhs.wrapping_add(i_imm);
-            check_alignment(pc, address, size, AccessKind::Read)?;
-            return Ok(Step::Memory(Pending {
-                access: Access::Read { address, size },
-                commit,
-                load_rd: rd,
-                signed,
-            }));
-        }
-        0x23 => {
-            let size = match funct3 {
-                0..=3 => 1 << funct3,
-                _ => return Err(illegal),
-            };
-            let offset = sign_extend((funct7 << 5) | rd as u64, 12);
-            let address = lhs.wrapping_add(offset);
-            check_alignment(pc, address, size, AccessKind::Write)?;
-            return Ok(Step::Memory(Pending {
-                access: Access::Write {
-                    address,
-                    data: rhs.to_le_bytes()[..size].to_vec(),
-                },
-                commit,
-                load_rd: 0,
-                signed: false,
-            }));
-        }
-        0x13 => Some(match funct3 {
-            0 => lhs.wrapping_add(i_imm),
-            1 if inst >> 26 == 0 => lhs << (i_imm & 63),
-            2 => u64::from((lhs as i64) < (i_imm as i64)),
-            3 => u64::from(lhs < i_imm),
-            4 => lhs ^ i_imm,
-            5 if inst >> 26 == 0 => lhs >> (i_imm & 63),
-            5 if inst >> 26 == 0x10 => ((lhs as i64) >> (i_imm & 63)) as u64,
-            6 => lhs | i_imm,
-            7 => lhs & i_imm,
-            _ => return Err(illegal),
-        }),
-        0x33 => Some(match (funct3, funct7) {
-            (0, 0) => lhs.wrapping_add(rhs),
-            (0, 0x20) => lhs.wrapping_sub(rhs),
-            (1, 0) => lhs << (rhs & 63),
-            (2, 0) => u64::from((lhs as i64) < (rhs as i64)),
-            (3, 0) => u64::from(lhs < rhs),
-            (4, 0) => lhs ^ rhs,
-            (5, 0) => lhs >> (rhs & 63),
-            (5, 0x20) => ((lhs as i64) >> (rhs & 63)) as u64,
-            (6, 0) => lhs | rhs,
-            (7, 0) => lhs & rhs,
-            _ => return Err(illegal),
-        }),
-        0x1b => {
-            let lhs = lhs as u32;
-            let result = match (funct3, funct7) {
-                (0, _) => lhs.wrapping_add(i_imm as u32),
-                (1, 0) => lhs << rs2,
-                (5, 0) => lhs >> rs2,
-                (5, 0x20) => ((lhs as i32) >> rs2) as u32,
-                _ => return Err(illegal),
-            };
-            Some(sign_extend(u64::from(result), 32))
-        }
-        0x3b => {
-            let (lhs, rhs) = (lhs as u32, rhs as u32);
-            let result = match (funct3, funct7) {
-                (0, 0) => lhs.wrapping_add(rhs),
-                (0, 0x20) => lhs.wrapping_sub(rhs),
-                (1, 0) => lhs << (rhs & 31),
-                (5, 0) => lhs >> (rhs & 31),
-                (5, 0x20) => ((lhs as i32) >> (rhs & 31)) as u32,
-                _ => return Err(illegal),
-            };
-            Some(sign_extend(u64::from(result), 32))
-        }
-        0x0f if funct3 == 0 => None, // Prior transactions finish before execute.
-        0x73 => {
-            let reason = match instruction {
-                0x0000_0073 => FaultReason::EnvironmentCall,
-                0x0010_0073 => FaultReason::Breakpoint,
-                _ => return Err(illegal),
+        BEQ { rs1, rs2, offset } => branch(reg(rs1) == reg(rs2), offset),
+        BNE { rs1, rs2, offset } => branch(reg(rs1) != reg(rs2), offset),
+        BLT { rs1, rs2, offset } => branch((reg(rs1) as i64) < reg(rs2) as i64, offset),
+        BGE { rs1, rs2, offset } => branch(reg(rs1) as i64 >= reg(rs2) as i64, offset),
+        BLTU { rs1, rs2, offset } => branch(reg(rs1) < reg(rs2), offset),
+        BGEU { rs1, rs2, offset } => branch(reg(rs1) >= reg(rs2), offset),
+        LB { rd, rs1, offset } => return load(rd, rs1, offset, 1, true, commit),
+        LH { rd, rs1, offset } => return load(rd, rs1, offset, 2, true, commit),
+        LW { rd, rs1, offset } => return load(rd, rs1, offset, 4, true, commit),
+        LD { rd, rs1, offset } => return load(rd, rs1, offset, 8, true, commit),
+        LBU { rd, rs1, offset } => return load(rd, rs1, offset, 1, false, commit),
+        LHU { rd, rs1, offset } => return load(rd, rs1, offset, 2, false, commit),
+        LWU { rd, rs1, offset } => return load(rd, rs1, offset, 4, false, commit),
+        SB { rs1, rs2, offset } => return store(rs1, rs2, offset, 1, commit),
+        SH { rs1, rs2, offset } => return store(rs1, rs2, offset, 2, commit),
+        SW { rs1, rs2, offset } => return store(rs1, rs2, offset, 4, commit),
+        SD { rs1, rs2, offset } => return store(rs1, rs2, offset, 8, commit),
+        ADDI { rd, rs1, imm } => Some((rd, reg(rs1).wrapping_add(imm as u64))),
+        SLTI { rd, rs1, imm } => Some((rd, u64::from((reg(rs1) as i64) < i64::from(imm)))),
+        SLTIU { rd, rs1, imm } => Some((rd, u64::from(reg(rs1) < imm as u64))),
+        XORI { rd, rs1, imm } => Some((rd, reg(rs1) ^ imm as u64)),
+        ORI { rd, rs1, imm } => Some((rd, reg(rs1) | imm as u64)),
+        ANDI { rd, rs1, imm } => Some((rd, reg(rs1) & imm as u64)),
+        ADDIW { rd, rs1, imm } => Some((rd, word((reg(rs1) as u32).wrapping_add(imm as u32)))),
+        SLLI { rd, rs1, shamt } => Some((rd, reg(rs1) << shamt)),
+        SRLI { rd, rs1, shamt } => Some((rd, reg(rs1) >> shamt)),
+        SRAI { rd, rs1, shamt } => Some((rd, ((reg(rs1) as i64) >> shamt) as u64)),
+        SLLIW { rd, rs1, shamt } => Some((rd, word((reg(rs1) as u32) << shamt))),
+        SRLIW { rd, rs1, shamt } => Some((rd, word((reg(rs1) as u32) >> shamt))),
+        SRAIW { rd, rs1, shamt } => Some((rd, ((reg(rs1) as i32) >> shamt) as u64)),
+        ADD { rd, rs1, rs2 } => Some((rd, reg(rs1).wrapping_add(reg(rs2)))),
+        SUB { rd, rs1, rs2 } => Some((rd, reg(rs1).wrapping_sub(reg(rs2)))),
+        SLL { rd, rs1, rs2 } => Some((rd, reg(rs1) << (reg(rs2) & 63))),
+        SLT { rd, rs1, rs2 } => Some((rd, u64::from((reg(rs1) as i64) < reg(rs2) as i64))),
+        SLTU { rd, rs1, rs2 } => Some((rd, u64::from(reg(rs1) < reg(rs2)))),
+        XOR { rd, rs1, rs2 } => Some((rd, reg(rs1) ^ reg(rs2))),
+        SRL { rd, rs1, rs2 } => Some((rd, reg(rs1) >> (reg(rs2) & 63))),
+        SRA { rd, rs1, rs2 } => Some((rd, ((reg(rs1) as i64) >> (reg(rs2) & 63)) as u64)),
+        OR { rd, rs1, rs2 } => Some((rd, reg(rs1) | reg(rs2))),
+        AND { rd, rs1, rs2 } => Some((rd, reg(rs1) & reg(rs2))),
+        ADDW { rd, rs1, rs2 } => Some((rd, word((reg(rs1) as u32).wrapping_add(reg(rs2) as u32)))),
+        SUBW { rd, rs1, rs2 } => Some((rd, word((reg(rs1) as u32).wrapping_sub(reg(rs2) as u32)))),
+        SLLW { rd, rs1, rs2 } => Some((rd, word((reg(rs1) as u32) << (reg(rs2) & 31)))),
+        SRLW { rd, rs1, rs2 } => Some((rd, word((reg(rs1) as u32) >> (reg(rs2) & 31)))),
+        SRAW { rd, rs1, rs2 } => Some((rd, ((reg(rs1) as i32) >> (reg(rs2) & 31)) as u64)),
+        FENCE { .. } => None,
+        // 0.3.1 decodes fm=0. RV64I treats the other FENCE modes (including TSO)
+        // as normal fences; all prior transactions have completed here.
+        UNIMP if instruction & 0x707f == 0x000f => None,
+        other => {
+            let reason = match other {
+                ECALL => FaultReason::EnvironmentCall,
+                EBREAK => FaultReason::Breakpoint,
+                _ => FaultReason::IllegalInstruction(instruction),
             };
             return Err(Fault {
                 pc,
@@ -266,11 +239,12 @@ pub fn execute(pc: u64, instruction: u32, registers: &[u64; 32]) -> Result<Step,
                 address: None,
             });
         }
-        _ => return Err(illegal),
     };
     check_alignment(pc, commit.next_pc, 4, AccessKind::Fetch)?;
-    if rd != 0 {
-        commit.register_write = value.map(|value| (rd, value));
+    if let Some((rd, value)) = write
+        && rd != 0
+    {
+        commit.register_write = Some((rd as usize, value));
     }
     Ok(Step::Commit(commit))
 }
@@ -646,7 +620,7 @@ mod tests {
     #[test]
     fn fences_produce_sequential_commits_and_system_instructions_report_the_cause() {
         let regs = [0; 32];
-        for instruction in [0x0ff0_000f, 0x8330_000f] {
+        for instruction in [0x0ff0_000f, 0x8330_000f, 0xf420_808f] {
             let fence = commit(0x100, instruction, &regs);
             assert_eq!((fence.next_pc, fence.register_write), (0x104, None));
         }
@@ -670,6 +644,10 @@ mod tests {
             0x0200_919b,
             0x0000_100f,
             0x0010_1173,
+            0x3020_0073, // MRET and WFI decode even with privileged=false in 0.3.1.
+            0x1050_0073,
+            0x0400_9193, // SLLI with reserved imm[6].
+            0x8330_100f, // A nonzero fm does not turn FENCE.I into FENCE.
         ] {
             assert_eq!(
                 execute(0x100, instruction, &regs),

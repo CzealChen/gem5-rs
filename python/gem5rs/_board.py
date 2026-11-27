@@ -150,8 +150,7 @@ class Board:
                 "connections": self._connections,
             }
         )
-        _native.validate(graph)
-        return _Machine(graph)
+        return _Machine(_native.build(graph))
 
 
 class Machine(Protocol):
@@ -164,7 +163,15 @@ class Machine(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class _Machine:
-    _graph: str
+    _configuration: _native.Configuration
 
     def run(self, limit: RunLimit) -> RunResult:
-        return decode_result(_native.run(self._graph, limit.events))
+        if not 0 <= limit.events <= (1 << 64) - 1:
+            raise _native.ConfigurationError(
+                "RunLimit.events must fit an unsigned 64-bit count"
+            )
+        payload = self._configuration.run(limit.events)
+        try:
+            return decode_result(payload)
+        except (KeyError, ValueError, TypeError) as error:
+            raise _native.SimulationError("Invalid simulation result") from error
