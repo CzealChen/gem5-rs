@@ -19,6 +19,16 @@
     channel = "stable";
   };
 
+  profiles.gem5.module.packages = [
+    (let
+      gem5 = pkgs.callPackage ./tools/gem5.nix { };
+    in
+    pkgs.writeShellScriptBin "gem5" ''
+      export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      exec ${lib.getExe gem5} "$@"
+    '')
+  ];
+
   # https://devenv.sh/processes/
   # processes.dev.exec = "${lib.getExe pkgs.watchexec} -n -- ls -la";
 
