@@ -7,6 +7,23 @@
 }:
 
 let
+  # The locked nixpkgs Spike recipe only lists Linux; use the same source and
+  # build/install checks on Darwin, with a local platform override.
+  spike = if pkgs.stdenv.hostPlatform.isDarwin then
+    pkgs.spike.overrideAttrs (old: {
+      # RISC-V SoftFloat uses a dummy commonNaN that its conversion functions
+      # never read. Clang diagnoses its address being passed uninitialized.
+      postPatch = (old.postPatch or "") + ''
+        substituteInPlace softfloat/softfloat.mk.in \
+          --replace-fail 'softfloat_CFLAGS = ' \
+            'softfloat_CFLAGS = -Wno-error=uninitialized-const-pointer '
+      '';
+      meta = old.meta // {
+        platforms = old.meta.platforms ++ lib.platforms.darwin;
+      };
+    })
+  else
+    pkgs.spike;
   rv64 = pkgs.pkgsCross.riscv64-embedded.stdenv.cc;
   # Expose the prefixed GCC and binutils alongside the native Rust linker.
   rv64Tools = pkgs.runCommand "rv64-elf-tools" { } ''
@@ -25,7 +42,7 @@ in
     pkgs.just
     pkgs.cargo-nextest
     rv64Tools
-    pkgs.spike
+    spike
     pkgs.dtc # Spike compiles its device tree at startup.
   ];
 
