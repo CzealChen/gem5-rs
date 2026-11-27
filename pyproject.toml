@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "gem5rs"
+version = "0.1.0"
+description = "Typed board assembly for the gem5-rs simulator"
+requires-python = ">=3.13"
+
+[dependency-groups]
+dev = ["maturin==1.15.0", "mypy==2.3.1"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "gem5rs._native"
+features = ["python"]
+
+[tool.mypy]
+strict = true
+files = ["python", "tests/typing/check.py", "tests/typing/valid.py"]

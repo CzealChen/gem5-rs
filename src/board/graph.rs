@@ -1,0 +1,568 @@
+use crate::{elf, memory};
+use serde::Deserialize;
+use serde_json::value::Value;
+use std::{collections::BTreeMap, ops::Range};
+
+pub(super) struct Graph {
+    graph_id: u64,
+    nodes: Vec<Node>,
+    connections: Vec<Connection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGraph {
+    graph_id: u64,
+    nodes: Vec<Value>,
+    connections: Vec<Value>,
+}
+
+struct Node {
+    name: String,
+    model: Model,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Model {
+    Traffic {
+        operations: Vec<Value>,
+    },
+    Rv64Core {
+        elf: Vec<u8>,
+        stack_pointer: u64,
+        cycle: u64,
+    },
+    FixedRam {
+        size_bytes: u64,
+        latency: u64,
+        capacity: u64,
+    },
+    DualBankRam {
+        size_bytes: u64,
+        latency: u64,
+        bank_bytes: u64,
+    },
+    Exit {
+        addr: u64,
+        width_bytes: u64,
+    },
+    Router {
+        inputs: u64,
+        ranges: Vec<Window>,
+        priority: Vec<u64>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Window {
+    start: u64,
+    size_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Operation {
+    Read { at: u64, addr: u64, size_bytes: u64 },
+    Write { at: u64, addr: u64, data: Vec<u8> },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Connection {
+    source: Endpoint,
+    target: Endpoint,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Endpoint {
+    graph_id: u64,
+    node: u64,
+    port: u64,
+}
+
+#[derive(Clone, Copy)]
+enum Side {
+    Input,
+    Output,
+}
+
+type Port = (usize, u64);
+
+pub(super) struct Plan<'a> {
+    pub sources: Vec<Requestor<'a>>,
+    pub routes: Vec<Mount>,
+}
+
+pub(super) struct Requestor<'a> {
+    pub id: usize,
+    pub name: &'a str,
+    pub label: String,
+    pub source: Source<'a>,
+}
+
+pub(super) enum Source<'a> {
+    Traffic(Vec<Scheduled>),
+    Core {
+        image: elf::Image<'a>,
+        stack_pointer: u64,
+        cycle: u64,
+    },
+}
+
+pub(super) struct Scheduled {
+    pub at: u64,
+    pub id: u64,
+    pub address: u64,
+    pub operation: memory::Operation,
+}
+
+pub(super) struct Mount {
+    pub route: memory::Route,
+    pub label: String,
+    range: Range<u64>,
+}
+
+impl Graph {
+    pub fn parse(json: &str) -> Result<Self, String> {
+        let RawGraph {
+            graph_id,
+            nodes,
+            connections,
+        } = serde_json::from_str(json).map_err(|err| format!("board graph: {err}"))?;
+        if graph_id == 0 {
+            return Err("graph_id must be positive".into());
+        }
+        let nodes = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(id, mut raw)| {
+                let name = raw
+                    .as_object_mut()
+                    .and_then(|fields| fields.remove("name"))
+                    .and_then(|value| serde_json::from_value::<String>(value).ok())
+                    .ok_or_else(|| format!("nodes[{id}].name: expected a string"))?;
+                let model = serde_json::from_value(raw)
+                    .map_err(|err| format!("{name} (nodes[{id}]): {err}"))?;
+                Ok(Node { name, model })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let connections = connections
+            .into_iter()
+            .enumerate()
+            .map(|(i, raw)| {
+                serde_json::from_value(raw).map_err(|err| format!("connections[{i}]: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            graph_id,
+            nodes,
+            connections,
+        })
+    }
+
+    fn endpoint(&self, endpoint: &Endpoint, side: Side) -> Result<Port, String> {
+        let end = match side {
+            Side::Input => "target",
+            Side::Output => "source",
+        };
+        let id = usize::try_from(endpoint.node)
+            .ok()
+            .filter(|&id| id < self.nodes.len());
+        if endpoint.graph_id != self.graph_id {
+            let label = id.map_or_else(
+                || format!("node {} port {}", endpoint.node, endpoint.port),
+                |id| self.nodes[id].port(side, endpoint.port),
+            );
+            return Err(format!(
+                "{end} {label} belongs to graph {}, expected graph {}",
+                endpoint.graph_id, self.graph_id
+            ));
+        }
+        let id = id.ok_or_else(|| {
+            format!(
+                "{end} node {} port {}: unknown instance",
+                endpoint.node, endpoint.port
+            )
+        })?;
+        let node = &self.nodes[id];
+        if endpoint.port >= node.port_count(side) {
+            let direction = match side {
+                Side::Input => "input",
+                Side::Output => "output",
+            };
+            return Err(format!(
+                "{end} {}: invalid {direction} port {}",
+                node.name, endpoint.port
+            ));
+        }
+        Ok((id, endpoint.port))
+    }
+
+    pub fn plan(&self) -> Result<Plan<'_>, String> {
+        let mut outgoing = BTreeMap::new();
+        let mut incoming = BTreeMap::new();
+        for (i, edge) in self.connections.iter().enumerate() {
+            let at = |err| format!("connections[{i}]: {err}");
+            let src = self.endpoint(&edge.source, Side::Output).map_err(at)?;
+            let dst = self.endpoint(&edge.target, Side::Input).map_err(at)?;
+            if outgoing.insert(src, dst).is_some() {
+                return Err(at(format!(
+                    "{} is already connected",
+                    self.label(src, Side::Output)
+                )));
+            }
+            if incoming.insert(dst, src).is_some() {
+                return Err(at(format!(
+                    "{} is already connected",
+                    self.label(dst, Side::Input)
+                )));
+            }
+        }
+
+        let mut router = None;
+        let mut requestors = Vec::new();
+        for (id, node) in self.nodes.iter().enumerate() {
+            if let Model::Router {
+                inputs,
+                ranges,
+                priority,
+            } = &node.model
+            {
+                node.check_router(*inputs, ranges, priority)?;
+                if let Some(previous) = router.replace(id) {
+                    return Err(format!(
+                        "{} and {}: a board uses one router",
+                        self.nodes[previous].port(Side::Input, 0),
+                        node.port(Side::Input, 0)
+                    ));
+                }
+            } else if node.is_requestor() {
+                requestors.push(id);
+            }
+            for (side, edges) in [(Side::Output, &outgoing), (Side::Input, &incoming)] {
+                for index in 0..node.port_count(side) {
+                    if !edges.contains_key(&(id, index)) {
+                        return Err(format!("{} is unconnected", node.port(side, index)));
+                    }
+                }
+            }
+        }
+
+        let mut routes = Vec::new();
+        if let Some(rid) = router {
+            let router = &self.nodes[rid];
+            let Model::Router {
+                ranges, priority, ..
+            } = &router.model
+            else {
+                unreachable!()
+            };
+            for &id in &requestors {
+                let dst = outgoing[&(id, 0)];
+                if dst.0 != rid {
+                    return Err(format!(
+                        "{} connects to {}; all requestors on this board must enter {}",
+                        self.nodes[id].port(Side::Output, 0),
+                        self.label(dst, Side::Input),
+                        router.name
+                    ));
+                }
+            }
+            requestors = priority
+                .iter()
+                .map(|&index| incoming[&(rid, index)].0)
+                .collect();
+            for (index, window) in ranges.iter().enumerate() {
+                let dst = outgoing[&(rid, index as u64)];
+                let label = router.port(Side::Output, index as u64);
+                let target = &self.nodes[dst.0];
+                if dst.0 == rid {
+                    return Err(format!(
+                        "{label} connects to {}; router outputs must connect to targets",
+                        target.port(Side::Input, dst.1)
+                    ));
+                }
+                routes.push(target.mount(Some((window, &label)))?);
+            }
+        } else if let Some(&id) = requestors.first() {
+            if let Some(&other) = requestors.get(1) {
+                return Err(format!(
+                    "{} and {}: multiple requestors must connect through a shared router",
+                    self.nodes[id].port(Side::Output, 0),
+                    self.nodes[other].port(Side::Output, 0)
+                ));
+            }
+            routes.push(self.nodes[outgoing[&(id, 0)].0].mount(None)?);
+        }
+
+        let mut has_core = false;
+        let sources = requestors
+            .into_iter()
+            .map(|id| {
+                let node = &self.nodes[id];
+                let label = node.port(Side::Output, 0);
+                let source = match &node.model {
+                    Model::Traffic { operations } => Source::Traffic(
+                        operations
+                            .iter()
+                            .enumerate()
+                            .map(|(i, op)| {
+                                Scheduled::parse(i, op)
+                                    .map_err(|err| format!("{label} operations[{i}]: {err}"))
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
+                    Model::Rv64Core {
+                        elf,
+                        stack_pointer,
+                        cycle,
+                    } => {
+                        if std::mem::replace(&mut has_core, true) {
+                            return Err(format!("{label}: a board uses one RV64 core"));
+                        }
+                        if *cycle == 0 {
+                            return Err(format!("{label}: cycle must be positive"));
+                        }
+                        Source::Core {
+                            image: image(elf, *stack_pointer, &routes)
+                                .map_err(|err| format!("{label}: {err}"))?,
+                            stack_pointer: *stack_pointer,
+                            cycle: *cycle,
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Requestor {
+                    id,
+                    name: &node.name,
+                    label,
+                    source,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Plan { sources, routes })
+    }
+
+    fn label(&self, (id, index): Port, side: Side) -> String {
+        self.nodes[id].port(side, index)
+    }
+}
+
+impl Node {
+    fn is_requestor(&self) -> bool {
+        matches!(self.model, Model::Traffic { .. } | Model::Rv64Core { .. })
+    }
+
+    fn port_count(&self, side: Side) -> u64 {
+        match (&self.model, side) {
+            (Model::Router { inputs, .. }, Side::Input) => *inputs,
+            (Model::Router { ranges, .. }, Side::Output) => ranges.len() as u64,
+            (_, Side::Input) => u64::from(!self.is_requestor()),
+            (_, Side::Output) => u64::from(self.is_requestor()),
+        }
+    }
+
+    fn port(&self, side: Side, index: u64) -> String {
+        let name = &self.name;
+        match (&self.model, side, index) {
+            (Model::Router { .. }, Side::Input, i) => format!("{name}.inputs[{i}]"),
+            (Model::Router { .. }, Side::Output, i) => format!("{name}.outputs[{i}]"),
+            (_, Side::Input, 0) if !self.is_requestor() => format!("{name}.input"),
+            (_, Side::Output, 0) if self.is_requestor() => format!("{name}.requests"),
+            (_, Side::Input, i) => format!("{name}.input[{i}]"),
+            (_, Side::Output, i) => format!("{name}.output[{i}]"),
+        }
+    }
+
+    fn check_router(&self, inputs: u64, ranges: &[Window], priority: &[u64]) -> Result<(), String> {
+        if inputs == 0 || priority.len() as u64 != inputs {
+            return Err(format!(
+                "{}.inputs: priority must list all ingress ports once and inputs must be positive",
+                self.name
+            ));
+        }
+        let mut seen = vec![false; priority.len()];
+        for &index in priority {
+            let port = self.port(Side::Input, index);
+            if index >= inputs {
+                return Err(format!("{port}: priority names an unknown ingress"));
+            }
+            if std::mem::replace(&mut seen[index as usize], true) {
+                return Err(format!("{port}: duplicate ingress in priority"));
+            }
+        }
+        if ranges.is_empty() {
+            return Err(format!(
+                "{}.outputs: router needs at least one address range",
+                self.name
+            ));
+        }
+        let mut windows = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, range)| {
+                address_range(range.start, range.size_bytes)
+                    .map(|range| (range, i))
+                    .map_err(|err| format!("{}: {err}", self.port(Side::Output, i as u64)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        windows.sort_unstable_by_key(|(range, _)| range.start);
+        for pair in windows.windows(2) {
+            let [(a, i), (b, j)] = pair else {
+                unreachable!()
+            };
+            if a.end > b.start {
+                return Err(format!(
+                    "{} overlaps {}",
+                    self.port(Side::Output, *i as u64),
+                    self.port(Side::Output, *j as u64)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn mount(&self, window: Option<(&Window, &str)>) -> Result<Mount, String> {
+        use memory::Target;
+
+        let label = self.port(Side::Input, 0);
+        let err = |message| format!("{label}: {message}");
+        let positive = |size: u64, what| {
+            usize::try_from(size)
+                .ok()
+                .filter(|&size| size != 0)
+                .ok_or_else(|| err(format!("{what} must be positive and fit the platform")))
+        };
+        let ram_size = |bytes| {
+            let size = positive(bytes, "size_bytes")?;
+            (size <= isize::MAX as usize)
+                .then_some(size)
+                .ok_or_else(|| err("size_bytes exceeds the platform allocation limit".into()))
+        };
+        let router_base = window.map_or(0, |(window, _)| window.start);
+        let (base, size, target) = match self.model {
+            Model::FixedRam {
+                size_bytes,
+                latency,
+                capacity,
+            } => (
+                router_base,
+                size_bytes,
+                Target::FixedRam {
+                    size_bytes: ram_size(size_bytes)?,
+                    latency,
+                    capacity: positive(capacity, "capacity")?,
+                },
+            ),
+            Model::DualBankRam {
+                size_bytes,
+                latency,
+                bank_bytes,
+            } => {
+                if bank_bytes >= size_bytes {
+                    return Err(err("bank_bytes must be smaller than size_bytes".into()));
+                }
+                (
+                    router_base,
+                    size_bytes,
+                    Target::BankedRam {
+                        size_bytes: ram_size(size_bytes)?,
+                        latency,
+                        bank_bytes: positive(bank_bytes, "bank_bytes")?,
+                    },
+                )
+            }
+            Model::Exit { addr, width_bytes } => {
+                if !matches!(width_bytes, 1 | 2 | 4 | 8) || addr % width_bytes != 0 {
+                    return Err(err("exit width must be 1, 2, 4 or 8 bytes and addr must be aligned to that width".into()));
+                }
+                (
+                    addr,
+                    width_bytes,
+                    Target::ExitMmio {
+                        width: width_bytes as usize,
+                        latency: 1,
+                    },
+                )
+            }
+            _ => unreachable!(),
+        };
+        if matches!(
+            target,
+            Target::FixedRam { latency: 0, .. } | Target::BankedRam { latency: 0, .. }
+        ) {
+            return Err(err("latency must be positive".into()));
+        }
+        if let Some((window, output)) = window
+            && (window.start, window.size_bytes) != (base, size)
+        {
+            return Err(format!(
+                "{output} range must match {label} ({base:#x}, {size} bytes)"
+            ));
+        }
+        let range = address_range(base, size).map_err(err)?;
+        Ok(Mount {
+            route: memory::Route { base, target },
+            range,
+            label,
+        })
+    }
+}
+
+impl Scheduled {
+    fn parse(id: usize, raw: &Value) -> Result<Self, String> {
+        let op: Operation = serde_json::from_value(raw.clone()).map_err(|err| err.to_string())?;
+        let (at, address, operation) = match op {
+            Operation::Read {
+                at,
+                addr,
+                size_bytes,
+            } => (
+                at,
+                addr,
+                memory::Operation::Read {
+                    size: usize::try_from(size_bytes)
+                        .map_err(|_| "size_bytes exceeds platform size")?,
+                },
+            ),
+            Operation::Write { at, addr, data } => (at, addr, memory::Operation::Write { data }),
+        };
+        Ok(Self {
+            at,
+            id: id as u64,
+            address,
+            operation,
+        })
+    }
+}
+
+fn address_range(base: u64, size: u64) -> Result<Range<u64>, String> {
+    if size == 0 {
+        return Err("address range must be nonempty".into());
+    }
+    let end = base
+        .checked_add(size)
+        .ok_or("address range end overflows u64")?;
+    Ok(base..end)
+}
+
+fn image<'a>(bytes: &'a [u8], sp: u64, routes: &[Mount]) -> Result<elf::Image<'a>, String> {
+    const STACK_ALIGNMENT: u64 = 16;
+    let bottom = sp
+        .checked_sub(STACK_ALIGNMENT)
+        .filter(|_| sp.is_multiple_of(STACK_ALIGNMENT))
+        .ok_or("stack_pointer needs one aligned 16-byte stack slot")?;
+    let ram = routes
+        .iter()
+        .find(|mount| {
+            !matches!(mount.route.target, memory::Target::ExitMmio { .. })
+                && mount.range.start <= bottom
+                && sp <= mount.range.end
+        })
+        .ok_or("stack_pointer must have stack space in connected RAM")?;
+    elf::load(bytes, ram.range.start..sp, STACK_ALIGNMENT)
+        .map_err(|err| format!("{}: {err}", ram.label))
+}

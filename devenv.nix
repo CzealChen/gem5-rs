@@ -6,14 +6,40 @@
   ...
 }:
 
+let
+  rv64 = pkgs.pkgsCross.riscv64-embedded.stdenv.cc;
+  # Expose the prefixed GCC and binutils alongside the native Rust linker.
+  rv64Tools = pkgs.runCommand "rv64-elf-tools" { } ''
+    mkdir -p "$out"
+    ln -s ${rv64}/bin "$out/bin"
+  '';
+in
 {
   # https://devenv.sh/basics/
   env.GREET = "devenv";
 
   # https://devenv.sh/packages/
-  packages = [ pkgs.git ];
+  # Tool versions come from the nixpkgs revision in devenv.lock.
+  packages = [
+    pkgs.git
+    pkgs.just
+    rv64Tools
+    pkgs.spike
+    pkgs.dtc # Spike compiles its device tree at startup.
+  ];
 
   # https://devenv.sh/languages/
+  languages.python = {
+    enable = true;
+    package = pkgs.python313;
+    venv.enable = true;
+    uv = {
+      enable = true;
+      sync.enable = true;
+      sync.arguments = [ "--locked" ];
+    };
+  };
+
   languages.rust = {
     enable = true;
     channel = "stable";

@@ -1,0 +1,12 @@
+from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, Tick, Traffic
+
+
+def assemble() -> None:
+    board = Board()
+    one = board.add(Traffic([]))
+    two = board.add(Traffic([]))
+    ram = board.add(FixedRam(size_bytes=64, latency=Address(10), capacity=1))  # error: Argument "latency" to "FixedRam" has incompatible type "Address"; expected "Tick"
+    banks = board.add(DualBankRam(size_bytes=64, latency=Tick(10), bank_bytes=8))
+    router = board.add(Router(1, [AddressRange(Address(0), 64)]))
+    board.connect(one.requests, two.requests)  # error: Argument 2 to "connect" of "Board" has incompatible type "RequestOut"; expected "TargetIn"
+    board.connect(router.inputs[0], banks.input)  # error: Argument 1 to "connect" of "Board" has incompatible type "TargetIn"; expected "RequestOut"
