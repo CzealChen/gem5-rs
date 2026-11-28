@@ -92,3 +92,39 @@ devenv shell -- python -m tools.am_audit
 并实际运行，成功退出（748 条指令）；这是一项独立冒烟验证，尚未增加通用 kernel
 运行入口。静态检查不代表其他 kernel 已可运行，也不覆盖尚未链接的 AM/klib
 实现、资源汇编或未来更换编译 ISA 后的结果。
+
+## OS 程序检查：先 yield-os，再 thread-os
+
+图形程序暂不接入。将这两个 OS 程序与现有 gem5-rs AM/klib 平台实际链接后，
+均在链接阶段失败，尚不能启动。检查日志位于
+`target/am-audit/yield-os-link.log` 和 `target/am-audit/thread-os-link.log`；
+这些是本次检查产物，不是上面的静态扫描命令自动生成的报告。
+
+| 程序 | 实际未定义的平台符号 | 最小运行目标 |
+| --- | --- | --- |
+| [yield-os](kernels/yield-os/yield-os.c) | `cte_init`、`kcontext`、`yield` | 单核协作式切换，持续输出 `ABAB…` |
+| [thread-os](kernels/thread-os/thread-os.c) | 上述三项，以及 `iset`、`atomic_xchg`、`cpu_count`、`cpu_current`、`mpe_init` | 先以单核配置，由定时器抢占调度五个线程 |
+
+`yield-os` 的最小实现范围是：
+
+1. CPU 提供实际需要的 Zicsr 指令及机器态 CSR（`mtvec/mepc/mcause/mstatus`），
+   支持 `ecall` 进入异常处理程序和 `mret` 返回。当前 `ecall` 只报告终止故障，
+   CSR 和 `mret` 会被判为非法指令；仅添加解码不能完成上下文切换。
+2. AM 实现 `cte_init/kcontext/yield` 和 trap 汇编，保存/恢复寄存器与任务栈，
+   将主动让出映射为 `EVENT_YIELD`，正确推进 `mepc`。
+   当前上游 `Context` 头文件带有布局 TODO，必须与实际 trap 汇编统一，不能直接
+   拼接上游未完成的 CTE 模板。
+3. 以限额运行验证多次 A/B 交替和上下文恢复。程序本身是无限循环，不应等待退出
+   或把达到预算上限直接判成成功；需要结合输出顺序和进度检查。
+
+这一步不需要图形、分页、定时器中断、多核或 A 扩展。协作切换也可以纯软件实现，
+但那只能验证调度程序，不能验证 CPU 的异常与返回机制；这里列的是机器态 trap 路线。
+
+`thread-os` 的 `func()` 循环没有主动 `yield`，因此只补上 `yield-os` 的功能后，
+会停留在某个线程里，无法验证五线程调度。下一步还需要定时器事件、中断使能/挂起
+状态（如 `mie/mip`）和 trap 递送。单核版本可以用保存/关闭/恢复中断保护的交换
+操作实现 `atomic_xchg`；这不具备跨核原子性。真正多核还需共享内存原子事务、
+hart 身份及多核装配支持，当前 Board 只允许一个 RV64 core。
+
+现有 Spike difftest 尚未覆盖 CSR 与 guest trap-handler 执行。扩展 OS 支持时，
+应同步扩展参考状态比较与异常处理协议，不能跳过这些操作后宣称 OS difftest 通过。
