@@ -168,7 +168,19 @@ impl Cpu {
                 .timer
                 .as_ref()
                 .is_some_and(|timer| timer.borrow().pending(at));
+            if let Some(observer) = &mut self.observer
+                && let Err(error) = observer.timer_pending(pending)
+            {
+                self.observation_error = Some(error.clone());
+                return Err(Fault {
+                    reason: error,
+                    pc: self.pc,
+                    addr: None,
+                    architectural: None,
+                });
+            }
             if let Some(vector) = machine.timer_interrupt(self.pc, pending) {
+                self.observe_trap(vector)?;
                 self.timer_interrupts += 1;
                 self.pc = vector;
                 return self.fetch(at);
@@ -239,6 +251,31 @@ impl Cpu {
         self.fetch(at)
     }
 
+    fn observe_trap(&mut self, vector: u64) -> Result<(), Fault> {
+        if let Some(observer) = &mut self.observer {
+            let trap = crate::observation::Trap {
+                pc: self.pc,
+                next_pc: vector,
+                registers: self.registers,
+                machine: self
+                    .machine
+                    .as_ref()
+                    .expect("trap requires machine mode")
+                    .snapshot(),
+            };
+            if let Err(error) = observer.trapped(&trap) {
+                self.observation_error = Some(error.clone());
+                return Err(Fault {
+                    reason: error,
+                    pc: self.pc,
+                    addr: None,
+                    architectural: None,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn retire(
         &mut self,
         at: u64,
@@ -274,6 +311,7 @@ impl Cpu {
                 registers: self.registers,
                 memory,
                 service,
+                machine: self.machine.as_ref().map(crate::machine::Machine::snapshot),
             };
             if let Err(error) = observer.retired(&retirement) {
                 self.observation_error = Some(error.clone());
@@ -350,6 +388,11 @@ impl Source for Cpu {
                     (&mut self.machine, &fault.architectural)
                     && let Some(vector) = machine.enter(architectural)
                 {
+                    if let Err(error) = self.observe_trap(vector) {
+                        let reason = error.reason.clone();
+                        self.fault = Some(error);
+                        return vec![SourceAction::Stop(reason)];
+                    }
                     self.pc = vector;
                     return vec![self.fetch(at).expect("aligned direct trap vector")];
                 }

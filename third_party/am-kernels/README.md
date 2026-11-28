@@ -172,6 +172,16 @@ CPU 在当前访存完成后的指令边界，检查 `mstatus.MIE`、`mie.MTIE` 
 接收 RTC 信号增加 `mtime` 并与 `mtimecmp` 比较。这里参考同样的比较语义，
 另提供可选主机墙钟源；没有复制 gem5 的设备实现。
 
-现有 Spike difftest 尚未覆盖 CSR 与 guest trap-handler 执行，两个 OS workload 的 `--difftest`
-及 `machine_mode=True` 与 difftest 的组合会在运行前明确拒绝，不会跳过比较后报通过。
+两个 OS workload 现已支持 `--difftest`：CSR、ecall/mret、trap 入口和普通指令
+由 Spike 独立执行并比较。定时器、console 和 Exit 等已配置特殊 MMIO 只在参考端
+跳过，核对指令和访问属性后同步结果；定时中断只注入 MTIP 外部电平，不复制 trap CSR。
+
+```sh
+python -m tools.am_benchmark --workload yield-os --instruction-budget 3000000 --difftest --display
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock simulated --difftest --display
+```
+
+OS 是无限循环，示例显式设置预算。差分成功记录 `bounded=true`，表示已执行前缀
+一致，仍需满足线程进展验收；tick/event 限额耗尽或异常不能算通过。wall 模式也可
+差分，但参考进程开销会改变中断位置，必要时增大定时周期；确定性比较使用 simulated。
 MicroBench 的默认 RV64I 运行和 difftest 验收保持不变。

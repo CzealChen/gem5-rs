@@ -23,7 +23,7 @@
 | 输入规模 | `--input test/train/ref/huge` 已开放；test 完整验收，较大输入已有构建与限额启动覆盖，不声称完成全部较大输入 |
 | 运行时服务 | SimpleUart 输出子集；共享 m5 ABI、模拟时间读取、成功/失败退出、work_begin/end；服务在提交边界执行 |
 | 输出与统计 | `AM_RESULT`、ROI tick/commits、端到端 JSON；恢复上游 Scored/Total time，非 test 有 min time，ref/huge 有 Marks |
-| 差分 | 独立 Spike 进程，普通指令流式比较，已完成的白名单平台操作显式同步；故障和协议失败不能自动跳过 |
+| 差分 | 独立 Spike 进程，普通指令流式比较，已完成的白名单平台操作显式同步；支持 M 态 CSR/陷阱比较和外部定时中断注入；故障和协议失败不能自动跳过 |
 | 单核 OS | yield-os 协作切换；thread-os 五线程定时抢占；M 态 CSR、异常、mret、机器定时中断和单核临界区原子交换 |
 | 定时器 | 独立 MachineTimer；simulated 随仿真 tick，wall 随主机单调经过时间；频率和重装间隔可配置 |
 | 运行限制 | AM CLI 默认三类预算均无限，显式参数才限制；自动测试用有限预算，无限循环 OS 用显式指令预算验收进展 |
@@ -47,7 +47,7 @@
 
 不新增 L2、非阻塞 cache、MSHR 合并、store/writeback buffer、预取、多核一致性、A 扩展、DMA、详细 DRAM、图形设备、MMU、Linux、O3、checkpoint 或独立 warmup。
 
-已实现的 M 态和定时器必须随 BlockingCore 迁移，不能因上述范围描述被删掉。FiveStageCore 首期以 RV64I + m5 的 benchmark 路径验收；将 OS、CSR 和异步中断扩展到五级核不作为 P2 完成条件，也不能静默接受不支持的配置。OS difftest 仍明确拒绝。
+已实现的 M 态和定时器必须随 BlockingCore 迁移，不能因上述范围描述被删掉。FiveStageCore 首期以 RV64I + m5 的 benchmark 路径验收；将 OS、CSR 和异步中断扩展到五级核不作为 P2 完成条件，也不能静默接受不支持的配置。现有 OS difftest（CSR/陷阱独立比较、特殊 MMIO 同步、外部 MTIP 注入）随 BlockingCore 迁移。
 
 ## 2. 验证原则
 
@@ -194,7 +194,7 @@ RV64I、单核、单发射、顺序提交，IF/ID/EX/MEM/WB；共享 ISA 功能�
 
 四种组合使用同一份 benchmark ELF、平台布局和输入，不因换模型重新裁剪算法。共享配置类型与提交结果，替换内存路径不改 CPU。
 
-BlockingCore 的 yield-os/thread-os 在无 cache 和 L1 路径保留进展验收；使用 simulated 定时器做确定性检查，wall 做有限预算下的独立进展测试。OS 不加入 Spike 矩阵，不要求两种内存路径产生相同调度点。
+BlockingCore 的 yield-os/thread-os 在无 cache 和 L1 路径保留进展验收；使用 simulated 定时器做确定性检查，wall 做有限预算下的独立进展测试。OS 两条内存路径均保留有界执行前缀的 Spike 差分，不要求两种内存路径产生相同调度点。
 
 ## 7. 运行控制、统计与现有实验入口
 
@@ -326,4 +326,4 @@ Python 函数标注参数与返回值；每种新增接线有通过和应被拒�
 6. 分层统计和 ROI 可解释，现有上游性能输出保留，实验记录能复现。
 7. 类型与安装后检查通过，旧公开接口和迁移适配器清理完成，分阶段提交和文档齐全。
 
-后续再按需求扩展缓存并发/L2、多核一致性、设备/DMA、MMU/全系统及更复杂 CPU。现有单核 M 态已是起点，不再重复规划为尚未实现；多核可见性、响应背压、运行时 functional 访问和 OS difftest 仍需各自的协议与验收。
+后续再按需求扩展缓存并发/L2、多核一致性、设备/DMA、MMU/全系统及更复杂 CPU。现有单核 M 态已是起点，不再重复规划为尚未实现；多核可见性、响应背压、运行时 functional 访问仍需各自的协议与验收。

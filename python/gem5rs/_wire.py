@@ -142,6 +142,9 @@ def _difftest(value: object) -> DifftestStatistics | None:
     passed = stats["passed"]
     if not isinstance(passed, bool):
         raise ValueError("difftest passed must be a boolean")
+    bounded = stats.get("bounded", False)
+    if not isinstance(bounded, bool):
+        raise ValueError("difftest bounded must be a boolean")
     return DifftestStatistics(
         _uint(stats["protocol_version"]),
         _text(stats["reference_commit"]),
@@ -150,6 +153,11 @@ def _difftest(value: object) -> DifftestStatistics | None:
         _uint(stats["synced_console"]),
         _uint(stats["synced_exit"]),
         passed,
+        _uint(stats.get("synced_mmio", 0)),
+        _uint(stats.get("traps", 0)),
+        _uint(stats.get("interrupts", 0)),
+        _uint(stats.get("csr_compared", 0)),
+        bounded,
     )
 
 

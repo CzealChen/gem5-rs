@@ -8,6 +8,20 @@ const MIE: u64 = 1 << 3;
 const MPIE: u64 = 1 << 7;
 const MPP: u64 = 3 << 11;
 
+/// Architectural M-mode state checked independently by reference execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub privilege: u64,
+    pub mstatus: u64,
+    pub mie: u64,
+    pub mip: u64,
+    pub mtvec: u64,
+    pub mscratch: u64,
+    pub mepc: u64,
+    pub mcause: u64,
+    pub mtval: u64,
+}
+
 #[derive(Debug)]
 pub struct Machine {
     mstatus: u64,
@@ -36,6 +50,20 @@ impl Default for Machine {
 }
 
 impl Machine {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            privilege: 3,
+            mstatus: self.mstatus,
+            mie: self.mie,
+            mip: u64::from(self.timer_pending) << 7,
+            mtvec: self.mtvec,
+            mscratch: self.mscratch,
+            mepc: self.mepc,
+            mcause: self.mcause,
+            mtval: self.mtval,
+        }
+    }
+
     fn read(&self, csr: u32) -> Option<u64> {
         Some(match csr {
             0x300 => self.mstatus,

@@ -128,6 +128,7 @@ def _node(model: _Model) -> dict[str, object]:
                     "timeout_ms": difftest.timeout_ms,
                     "expected_exit_code": difftest.expected_exit_code,
                     "expected_failure": difftest.expected_failure,
+                    "allow_instruction_limit": difftest.allow_instruction_limit,
                 },
             }
         case Router(inputs, ranges, priority):

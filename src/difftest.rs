@@ -23,6 +23,8 @@ pub struct Config {
     pub timeout_ms: u64,
     pub expected_exit_code: u64,
     pub expected_failure: bool,
+    #[serde(default)]
+    pub allow_instruction_limit: bool,
 }
 
 impl Config {
@@ -99,7 +101,7 @@ impl Reference {
             timeout: Duration::from_millis(config.timeout_ms),
         };
         let hello = reference.exchange("hello".into())?;
-        if hello != format!("hello 1 {SPIKE_COMMIT} rv64i pc_gpr_mem") {
+        if hello != format!("hello 2 {SPIKE_COMMIT} rv64i_zicsr pc_gpr_mem_machine") {
             return Err(format!("reference handshake mismatch: {hello}"));
         }
         Ok(reference)
@@ -184,12 +186,20 @@ pub struct Statistics {
     pub synced_console: u64,
     pub synced_exit: u64,
     pub passed: bool,
+    pub synced_mmio: u64,
+    pub traps: u64,
+    pub interrupts: u64,
+    pub csr_compared: u64,
+    pub bounded: bool,
 }
 
 #[derive(Default)]
 pub struct Platform {
     pub console: Vec<u64>,
     pub exit: Vec<(u64, usize)>,
+    /// Board-validated timer: 64-bit reads at base/+8, writes only at +8.
+    pub timers: Vec<u64>,
+    pub machine_mode: bool,
 }
 
 pub struct Driver {
@@ -201,6 +211,7 @@ pub struct Driver {
     stats: Statistics,
     recent: VecDeque<String>,
     failure: Option<String>,
+    timer_pending: bool,
 }
 
 fn state_command(command: &str, pc: u64, registers: &[u64; 32]) -> String {
@@ -222,7 +233,12 @@ impl Driver {
             return Err("reference RAM range must be nonempty".into());
         }
         let mut reference = Reference::start(&config)?;
-        let command = format!("init rv64i {} {}", ram.start, ram.end - ram.start);
+        let isa = if platform.machine_mode {
+            "rv64i_zicsr"
+        } else {
+            "rv64i"
+        };
+        let command = format!("init {isa} {} {}", ram.start, ram.end - ram.start);
         reference.ok(state_command(
             &command,
             image.entry,
@@ -245,12 +261,13 @@ impl Driver {
             reference_pc: image.entry,
             reference_registers: image.initial_registers(),
             stats: Statistics {
-                protocol_version: 1,
+                protocol_version: 2,
                 reference_commit: SPIKE_COMMIT.into(),
                 ..Statistics::default()
             },
             recent: VecDeque::new(),
             failure: None,
+            timer_pending: false,
         })
     }
 
@@ -270,6 +287,61 @@ impl Driver {
         Ok(self.stats.clone())
     }
 
+    pub fn finish_instruction_limit(&mut self) -> Result<Statistics, String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if !self.config.allow_instruction_limit {
+            return Err("difftest instruction-limit completion was not enabled".into());
+        }
+        self.reference.finish()?;
+        self.stats.passed = true;
+        self.stats.bounded = true;
+        Ok(self.stats.clone())
+    }
+
+    fn check_machine(
+        &mut self,
+        dut: Option<crate::machine::Snapshot>,
+        reference: Option<crate::machine::Snapshot>,
+    ) -> Result<(), String> {
+        if dut.is_some() != self.platform.machine_mode || dut != reference {
+            return Err(format!(
+                "machine CSR state DUT={dut:?}, reference={reference:?}"
+            ));
+        }
+        if dut.is_some() {
+            self.stats.csr_compared += 1;
+        }
+        Ok(())
+    }
+
+    fn inspect_machine(
+        &mut self,
+        pc: u64,
+        registers: &[u64; 32],
+        machine: crate::machine::Snapshot,
+    ) -> Result<(), String> {
+        let reply = self.reference.exchange("machine".into())?;
+        let mut fields = reply.split_whitespace();
+        if fields.next() != Some("machine") {
+            return Err(format!("expected machine state: {reply}"));
+        }
+        if number(&mut fields)? != pc {
+            return Err(format!("trap/platform next-PC differs: {reply}"));
+        }
+        for (index, expected) in registers.iter().enumerate() {
+            if number(&mut fields)? != *expected {
+                return Err(format!("trap/platform x{index} differs: {reply}"));
+            }
+        }
+        let reference = parse_machine(&mut fields)?;
+        if fields.next().is_some() {
+            return Err("extra machine state fields".into());
+        }
+        self.check_machine(Some(machine), Some(reference))
+    }
+
     fn compare(&mut self, commit: &Retirement) -> Result<(), String> {
         if commit.pc != self.reference_pc {
             return Err(format!(
@@ -278,6 +350,9 @@ impl Driver {
             ));
         }
         let mut special = false;
+        if commit.machine.is_some() != self.platform.machine_mode {
+            return Err("machine observation/configuration mismatch".into());
+        }
         if let Some(service) = commit.service {
             if crate::m5::Operation::decode(commit.instruction) != Some(service)
                 || commit.memory.is_some()
@@ -285,6 +360,14 @@ impl Driver {
                 return Err("invalid completed service observation".into());
             }
             self.stats.synced_m5 += 1;
+            special = true;
+        } else if let Some(memory) = &commit.memory
+            && memory.data.len() == 8
+            && self.platform.timers.iter().any(|base| {
+                memory.address == base + 8 || (!memory.write && memory.address == *base)
+            })
+        {
+            self.stats.synced_mmio += 1;
             special = true;
         } else if let Some(memory) = &commit.memory
             && memory.write
@@ -311,27 +394,48 @@ impl Driver {
                 return Err("platform operation has nonsequential next PC".into());
             }
             if let Some(memory) = &commit.memory {
-                // Recognize the MMIO store using its real decoding and the
-                // previously compared state, not only a DUT-reported address.
+                // Decode from the last compared state; a DUT-provided MMIO
+                // address alone cannot authorize skipping an ordinary RAM access.
                 let decoded =
                     crate::riscv::execute(commit.pc, commit.instruction, &self.reference_registers)
-                        .map_err(|fault| format!("platform store decode: {fault:?}"))?;
+                        .map_err(|fault| format!("platform access decode: {fault:?}"))?;
                 let crate::riscv::Step::Memory(pending) = decoded else {
-                    return Err("platform access is not a decoded store".into());
+                    return Err("platform access is not a decoded load/store".into());
                 };
-                if pending.access()
-                    != &(crate::riscv::Access::Write {
-                        address: memory.address,
-                        data: memory.data.clone(),
-                    })
-                {
-                    return Err(
-                        "platform store address/data disagree with decoded instruction".into(),
-                    );
+                let completion = match pending.access() {
+                    crate::riscv::Access::Write { address, data }
+                        if memory.write && *address == memory.address && *data == memory.data =>
+                    {
+                        crate::riscv::Response::WriteAck
+                    }
+                    crate::riscv::Access::Read { address, size }
+                        if !memory.write
+                            && *address == memory.address
+                            && *size == memory.data.len() =>
+                    {
+                        crate::riscv::Response::ReadData(&memory.data)
+                    }
+                    _ => {
+                        return Err(
+                            "platform address/width/data disagree with decoded instruction".into(),
+                        );
+                    }
+                };
+                let expected = pending
+                    .complete(completion)
+                    .map_err(|fault| format!("platform completion: {fault:?}"))?;
+                let mut registers = self.reference_registers;
+                let mut pc = self.reference_pc;
+                expected.apply(&mut pc, &mut registers);
+                if registers != commit.registers || pc != commit.next_pc {
+                    return Err("platform completion register/PC mismatch".into());
                 }
             }
             self.reference
                 .ok(state_command("sync", commit.next_pc, &commit.registers))?;
+            if let Some(machine) = commit.machine {
+                self.inspect_machine(commit.next_pc, &commit.registers, machine)?;
+            }
         } else {
             let reply = self.reference.exchange("step".into())?;
             if reply.starts_with("fault ") {
@@ -363,6 +467,7 @@ impl Driver {
                     commit.memory, state.memory
                 ));
             }
+            self.check_machine(commit.machine, state.machine)?;
             self.stats.compared += 1;
         }
         self.reference_pc = commit.next_pc;
@@ -372,6 +477,73 @@ impl Driver {
 }
 
 impl Observer for Driver {
+    fn timer_pending(&mut self, pending: bool) -> Result<(), String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if !self.platform.machine_mode {
+            return Err("timer input requires machine mode".into());
+        }
+        if pending != self.timer_pending {
+            if let Err(error) = self.reference.ok(format!("pending {}", u8::from(pending))) {
+                self.failure = Some(error.clone());
+                return Err(error);
+            }
+            self.timer_pending = pending;
+        }
+        Ok(())
+    }
+
+    fn trapped(&mut self, trap: &crate::observation::Trap) -> Result<(), String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            if !self.platform.machine_mode || trap.pc != self.reference_pc {
+                return Err("trap pre-PC/configuration mismatch".to_string());
+            }
+            let reply = self.reference.exchange("step".into())?;
+            let mut fields = reply.split_whitespace();
+            if fields.next() != Some("fault") {
+                return Err(format!("expected trap, reference {reply}"));
+            }
+            let pc = number(&mut fields)?;
+            let _instruction = number(&mut fields)?;
+            let cause = number(&mut fields)?;
+            let epc = number(&mut fields)?;
+            let value = number(&mut fields)?;
+            if fields.next().is_some()
+                || (pc, cause, epc, value)
+                    != (
+                        trap.pc,
+                        trap.machine.mcause,
+                        trap.machine.mepc,
+                        trap.machine.mtval,
+                    )
+            {
+                return Err(format!("trap differs: DUT={trap:?}, reference={reply}"));
+            }
+            self.inspect_machine(trap.next_pc, &trap.registers, trap.machine)?;
+            self.reference_pc = trap.next_pc;
+            self.reference_registers = trap.registers;
+            if cause >> 63 != 0 {
+                self.stats.interrupts += 1;
+            } else {
+                self.stats.traps += 1;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let error = format!(
+                "difftest first trap difference at {:#x}: {error}; recent: {:?}",
+                trap.pc, self.recent
+            );
+            self.failure = Some(error.clone());
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn faulted(&mut self, fault: &crate::riscv::Fault) -> Result<(), String> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
@@ -454,17 +626,18 @@ impl Observer for Driver {
     }
 }
 
+fn number(fields: &mut std::str::SplitWhitespace<'_>) -> Result<u64, String> {
+    fields
+        .next()
+        .ok_or("reference missing state field")?
+        .parse()
+        .map_err(|_| "reference invalid integer".into())
+}
+
 fn parse_state(reply: &str) -> Result<Retirement, String> {
     let mut fields = reply.split_whitespace();
     if fields.next() != Some("state") {
         return Err(format!("reference expected state, received {reply}"));
-    }
-    fn number(fields: &mut std::str::SplitWhitespace<'_>) -> Result<u64, String> {
-        fields
-            .next()
-            .ok_or("reference missing state field")?
-            .parse()
-            .map_err(|_| "reference invalid integer".into())
     }
     let pc = number(&mut fields)?;
     let instruction =
@@ -499,8 +672,13 @@ fn parse_state(reply: &str) -> Result<Retirement, String> {
         }
         _ => return Err("reference multiple memory effects outside RV64I scope".into()),
     };
+    let machine = match fields.next() {
+        None => None,
+        Some("machine") => Some(parse_machine(&mut fields)?),
+        Some(_) => return Err("reference extra state fields".into()),
+    };
     if fields.next().is_some() {
-        return Err("reference extra state fields".into());
+        return Err("reference extra machine fields".into());
     }
     Ok(Retirement {
         pc,
@@ -509,6 +687,23 @@ fn parse_state(reply: &str) -> Result<Retirement, String> {
         registers,
         memory,
         service: None,
+        machine,
+    })
+}
+
+fn parse_machine(
+    fields: &mut std::str::SplitWhitespace<'_>,
+) -> Result<crate::machine::Snapshot, String> {
+    Ok(crate::machine::Snapshot {
+        privilege: number(fields)?,
+        mstatus: number(fields)?,
+        mie: number(fields)?,
+        mip: number(fields)?,
+        mtvec: number(fields)?,
+        mscratch: number(fields)?,
+        mepc: number(fields)?,
+        mcause: number(fields)?,
+        mtval: number(fields)?,
     })
 }
 

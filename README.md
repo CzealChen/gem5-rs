@@ -24,7 +24,7 @@ devenv shell -- just check-am
 python -m tools.am_benchmark --workload yield-os --instruction-budget 3000000 --display
 ```
 
-该无限循环程序以预算内的 `ABAB…` 交替进展验收；OS 模式暂不支持 difftest。
+该无限循环程序以预算内的 `ABAB…` 交替进展验收；可加 `--difftest` 比较 M 态 CSR、异常/返回和指令执行。
 其他 kernel 的接入状态见 [AM kernels 说明](third_party/am-kernels/README.md)。
 
 单核 `thread-os` 也已接入定时器抢占，时钟来源可选：

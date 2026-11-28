@@ -214,7 +214,13 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
             ),
             _ => None,
         };
-        Some(driver.borrow_mut().finish(exit).map_err(|error| {
+        let instruction_limit = cpu.as_ref().is_some_and(Cpu::instruction_limit);
+        let compared = if instruction_limit {
+            driver.borrow_mut().finish_instruction_limit()
+        } else {
+            driver.borrow_mut().finish(exit)
+        };
+        Some(compared.map_err(|error| {
             RunError::from(format!(
                 "{error}; DUT stop={:?}, fault={:?}",
                 result.stop,
@@ -407,14 +413,17 @@ struct Report<'a> {
 fn start_reference(
     plan: &Plan,
 ) -> Result<Option<std::rc::Rc<RefCell<crate::difftest::Driver>>>, RunError> {
-    let Some((image, config)) = plan.sources.iter().find_map(|source| match &source.source {
-        Source::Core {
-            image,
-            difftest: Some(config),
-            ..
-        } => Some((image, config)),
-        _ => None,
-    }) else {
+    let Some((image, config, machine_mode)) =
+        plan.sources.iter().find_map(|source| match &source.source {
+            Source::Core {
+                image,
+                difftest: Some(config),
+                machine_mode,
+                ..
+            } => Some((image, config, *machine_mode)),
+            _ => None,
+        })
+    else {
         return Ok(None);
     };
     if plan.sources.len() != 1 {
@@ -423,14 +432,13 @@ fn start_reference(
             .into());
     }
     let mut ram = None;
-    let mut platform = crate::difftest::Platform::default();
+    let mut platform = crate::difftest::Platform {
+        machine_mode,
+        ..Default::default()
+    };
     for mount in &plan.routes {
         match mount.target {
-            MountTarget::Timer { .. } => {
-                return Err("machine timer is outside the difftest protocol"
-                    .to_owned()
-                    .into());
-            }
+            MountTarget::Timer { base, .. } => platform.timers.push(base),
             MountTarget::Console { base, .. } => platform.console.push(base),
             MountTarget::Memory(memory::Route { base, target }) => match target {
                 memory::Target::FixedRam { size_bytes, .. }

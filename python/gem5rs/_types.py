@@ -84,6 +84,7 @@ class DifftestConfig:
     timeout_ms: int = 5000
     expected_exit_code: int = 0
     expected_failure: bool = False
+    allow_instruction_limit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +259,11 @@ class DifftestStatistics:
     synced_console: int
     synced_exit: int
     passed: bool
+    synced_mmio: int = 0
+    traps: int = 0
+    interrupts: int = 0
+    csr_compared: int = 0
+    bounded: bool = False
 
 
 @dataclass(frozen=True, slots=True)

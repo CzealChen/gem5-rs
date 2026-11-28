@@ -24,7 +24,9 @@ from gem5rs import (
 )
 
 
-def check_timer_abi(source: Path, platform: BareMetalPlatform) -> None:
+def check_timer_abi(
+    source: Path, platform: BareMetalPlatform, reference: DifftestConfig
+) -> None:
     # Reuse the actual platform in an isolated finite AM ABI probe.
     with TemporaryDirectory() as directory:
         work = Path(directory)
@@ -56,6 +58,33 @@ def check_timer_abi(source: Path, platform: BareMetalPlatform) -> None:
         )
         assert probe.stop_reason == StopReason.EXIT and probe.exit_code == 0
         assert probe.stats.timer_interrupts >= 3
+        compared = run_guest(
+            (work / "build/thread-os-riscv64-gem5rs.elf").read_bytes(),
+            platform,
+            machine_mode=True,
+            difftest=reference,
+        )
+        assert replace(compared, difftest=None) == probe
+        assert compared.difftest is not None and compared.difftest.passed
+        assert compared.difftest.interrupts == probe.stats.timer_interrupts
+        # Same reload count, but 100 Hz gives a long enough host-time quantum
+        # for reference IPC; no exact timing/output equality is expected here.
+        wall = replace(
+            platform,
+            timer_clock="wall",
+            timer_frequency_hz=100,
+            timer_interval_us=platform.timer_reload * 10000,
+        )
+        wall_probe = run_guest(
+            (work / "build/thread-os-riscv64-gem5rs.elf").read_bytes(),
+            wall,
+            machine_mode=True,
+            difftest=reference,
+        )
+        assert wall_probe.stop_reason == StopReason.EXIT
+        assert wall_probe.difftest is not None and wall_probe.difftest.passed
+        assert wall_probe.difftest.interrupts >= 3
+        assert wall_probe.difftest.synced_mmio > 0
 
 
 def main() -> None:
@@ -206,14 +235,24 @@ def main() -> None:
             raise AssertionError(
                 "OS progress requires repeated alternation and the expected stop"
             )
+    bounded_reference = replace(reference, allow_instruction_limit=True)
+    os_compared = run_guest(
+        os_guest.elf.read_bytes(),
+        os_platform,
+        machine_mode=True,
+        difftest=bounded_reference,
+    )
+    assert replace(os_compared, difftest=None) == os_result
+    assert os_compared.difftest is not None and os_compared.difftest.passed
+    assert os_compared.difftest.bounded and os_compared.difftest.traps > 0
     try:
         run_guest(
             os_guest.elf.read_bytes(), small, machine_mode=True, difftest=reference
         )
-    except ConfigurationError as error:
-        assert "machine_mode" in str(error)
+    except SimulationError as error:
+        assert "instruction-limit" in str(error)
     else:
-        raise AssertionError("unsupported OS difftest must reject before execution")
+        raise AssertionError("bounded difftest needs explicit opt-in")
     thread_platform = replace(
         platform,
         timer=AddressRange(Address(0x0200_0000), 16),
@@ -231,6 +270,17 @@ def main() -> None:
         run_guest(threads.elf.read_bytes(), thread_platform, machine_mode=True)
         == thread_result
     )
+    thread_compared = run_guest(
+        threads.elf.read_bytes(),
+        thread_platform,
+        machine_mode=True,
+        difftest=bounded_reference,
+    )
+    assert replace(thread_compared, difftest=None) == thread_result
+    assert thread_compared.difftest is not None and thread_compared.difftest.passed
+    assert thread_compared.difftest.bounded
+    assert thread_compared.difftest.interrupts == thread_result.stats.timer_interrupts
+    assert thread_compared.difftest.synced_mmio > 0
     # Clock source is hardware configuration, not a change to the guest binary.
     assert (
         build_guest(
@@ -240,7 +290,7 @@ def main() -> None:
     )
     quick = replace(thread_platform, instruction_budget=100_000, timer_interval_us=10)
     quick_guest = build_guest(quick, "thread-os")
-    check_timer_abi(quick_guest.elf.parent.parent, quick)
+    check_timer_abi(quick_guest.elf.parent.parent, quick, reference)
     traced_timer = run_guest(
         quick_guest.elf.read_bytes(), quick, machine_mode=True, trace=True
     )

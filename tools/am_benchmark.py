@@ -472,10 +472,6 @@ def main() -> None:
     mainargs = input_size(args.input)
     if workload != "microbench" and mainargs != "test":
         parser.error("--input is only supported for microbench")
-    if workload in ("yield-os", "thread-os") and args.difftest:
-        parser.error(
-            "OS machine mode is not supported by the current difftest protocol"
-        )
     base = am_test_platform()
     ram_mib = (
         positive_option(args.ram_mib)
@@ -508,7 +504,10 @@ def main() -> None:
     difftest = None
     if args.difftest:
         subprocess.run(["bash", str(ROOT / "tools/build-spike-adapter.sh")], check=True)
-        difftest = DifftestConfig(str(ROOT / "target/spike/adapter"))
+        difftest = DifftestConfig(
+            str(ROOT / "target/spike/adapter"),
+            allow_instruction_limit=workload in ("yield-os", "thread-os"),
+        )
     start = time.perf_counter()
     try:
         result = run_guest(

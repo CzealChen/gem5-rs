@@ -386,12 +386,6 @@ impl Graph {
                         difftest,
                         machine_mode,
                     } => {
-                        if *machine_mode && difftest.is_some() {
-                            return Err(ConfigError::from(
-                                "machine_mode is not supported by the current difftest protocol"
-                                    .to_owned(),
-                            ));
-                        }
                         if std::mem::replace(&mut has_core, true) {
                             return Err(ConfigError::from(format!(
                                 "{label}: a board uses one RV64 core"

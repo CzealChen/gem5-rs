@@ -13,10 +13,9 @@ Make, tests the platform, and writes `target/am-results/acceptance.json`.
 reference protocol, error injection and process failures. CI runs all three.
 AM acceptance compares hello and all ten test algorithms with Spike, checks
 difftest on/off invariance, and records protocol/source identity and sync counts.
-It also checks bounded `yield-os` progress, trace invariance, and rejection of
-unsupported machine-mode difftest. Single-hart `thread-os` acceptance checks timer
+It also checks bounded `yield-os` progress, trace invariance, and M-mode difftest. Single-hart `thread-os` acceptance checks timer
 preemption, five-thread progress, deterministic replay, interrupt wiring, and an
-AM atomic/register-preservation probe.
+AM atomic/register-preservation probe with both simulated and wall-clock difftest.
 
 For interactive runs inside `devenv shell`:
 
@@ -120,13 +119,16 @@ work; large inputs therefore require host-memory planning.
 
 `--difftest` builds the pinned independent Spike adapter and attaches the Rust
 observer to the same blocking CPU. Every ordinary instruction compares PC, word,
-next PC, all GPRs and memory effects. Completed m5/console/Exit operations synchronize
+next PC, all GPRs and memory effects; machine mode also compares privilege and
+mstatus/mie/mip/mtvec/mscratch/mepc/mcause/mtval. Completed m5/console/Exit/timer operations synchronize
 all GPRs and PC; the reference never executes those platform operations.
 
-The option does not change guest build inputs, timing, console bytes, ROI or
-end-to-end simulated statistics. Native errors stop at the first difference and
+With simulated clocks the option does not change guest build inputs, timing,
+console bytes, ROI or end-to-end simulated statistics. Wall clocks are subject to
+host execution overhead and cannot provide this invariance. Native errors stop at the first difference and
 are saved in the requested JSON report. Reference timeouts/crashes and guest
-faults never count as a passing run. The expected exit is success/code zero; the
+terminal faults never count as a passing run. Handled machine traps continue
+execution after independently comparing the trap transition. The expected exit is success/code zero; the
 public `DifftestConfig` also supports explicit failure/code expectations.
 
 Python assembly can pass `DifftestConfig(adapter=...)` to `Rv64Core.difftest`.
@@ -167,8 +169,22 @@ running. Acceptance requires an
 instruction-budget stop, no fault, and at least four strictly alternating letters;
 it reports `bounded-progress`, not successful guest termination. A smaller budget
 may be useful for diagnosis but will fail acceptance if it shows too little progress.
-`--difftest` is explicitly rejected for this mode until the reference protocol
-compares machine state and trap transitions. The same restriction applies to `thread-os`.
+Add `--difftest` for independent CSR/trap/mret and ordinary instruction comparison.
+The OS CLI enables `DifftestConfig.allow_instruction_limit`; a verified prefix has
+`difftest.bounded=true`, and still needs the workload progress checks. Without
+this explicit public configuration, a difftest instruction-limit stop is an error.
+Tick/event limits remain errors. No default limit is introduced.
+
+```sh
+python -m tools.am_benchmark --workload yield-os --instruction-budget 3000000 --difftest --display
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock simulated --difftest --display
+```
+
+Timer MMIO is skipped only in the reference, after checking the configured device,
+address, width, direction and instruction effects. Reads synchronize the DUT value;
+CSR instructions and trap entry are not skipped. External MTIP level changes are
+injected at the same instruction boundary, and Spike decides masking/delivery.
+Device semantics remain covered by independent timer tests.
 
 ## Single-hart preemption and timer clocks
 
@@ -225,4 +241,5 @@ clock execution is intentionally nondeterministic: host scheduling, logging and
 trace overhead change where interrupts occur. It does not pace the simulation to
 wall time. Deterministic regression/trace invariance use simulated clocks; wall
 clock runs may need a longer quantum or instruction budget to meet the same
-progress criteria. Both modes remain outside the current difftest protocol.
+progress criteria. Both modes support difftest; its host IPC overhead may require
+a longer wall-clock quantum. Use simulated mode for reproducible comparisons.

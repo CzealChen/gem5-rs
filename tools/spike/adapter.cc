@@ -57,6 +57,14 @@ public:
   }
 };
 
+static void machine_state(state_t* state) {
+  std::cout << ' ' << state->prv << ' ' << state->mstatus->read()
+            << ' ' << state->mie->read() << ' ' << state->mip->read()
+            << ' ' << state->mtvec->read() << ' ' << state->csrmap.at(0x340)->read()
+            << ' ' << state->mepc->read() << ' ' << state->mcause->read()
+            << ' ' << state->mtval->read();
+}
+
 static void sync(std::istream& input, state_t* state) {
   uint64_t pc = number(input);
   std::array<uint64_t, 32> registers;
@@ -74,6 +82,7 @@ int main() {
     std::unique_ptr<FILE, decltype(&fclose)> log(fopen("/dev/null", "w"), fclose);
     require(bool(log), "cannot open commit log sink");
     bool started = false;
+    bool machine = false;
     std::array<char, 16385> line;
     while (std::cin.getline(line.data(), line.size())) {
       std::istringstream input(line.data());
@@ -81,22 +90,24 @@ int main() {
       input >> command;
       if (command == "hello") {
         end(input);
-        std::cout << "hello 1 " << SPIKE_SOURCE_COMMIT << " rv64i pc_gpr_mem\n";
+        std::cout << "hello 2 " << SPIKE_SOURCE_COMMIT << " rv64i_zicsr pc_gpr_mem_machine\n";
       } else if (command == "init") {
         require(!cpu, "already initialized");
         std::string isa;
         input >> isa;
-        require(isa == "rv64i", "unsupported ISA");
+        require(isa == "rv64i" || isa == "rv64i_zicsr", "unsupported ISA");
+        machine = isa == "rv64i_zicsr";
         memory.base = number(input);
         uint64_t size = number(input);
         require(size && size <= 256 * 1024 * 1024 && !(size % 4096) && !(memory.base % 4096) && memory.base <= UINT64_MAX - size, "invalid RAM layout");
         memory.ram.resize(size, 0);
-        memory.cfg.isa = "RV64I";
+        memory.cfg.isa = machine ? "RV64I_Zicsr" : "RV64I";
         memory.cfg.priv = "M";
         memory.cfg.mem_layout = {mem_cfg_t(memory.base, size)};
-        cpu = std::make_unique<processor_t>("RV64I", "M", &memory.cfg, &memory, 0, false, log.get(), std::cerr);
+        cpu = std::make_unique<processor_t>(memory.cfg.isa, "M", &memory.cfg, &memory, 0, false, log.get(), std::cerr);
         memory.harts.emplace(0, cpu.get());
         cpu->enable_log_commits();
+        if (machine) cpu->get_state()->mstatus->write(3ULL << 11);
         sync(input, cpu->get_state());
         memory.offset(cpu->get_state()->pc, 4);
         std::cout << "ok\n";
@@ -122,10 +133,31 @@ int main() {
         sync(input, cpu->get_state());
         started = true;
         std::cout << "ok\n";
+      } else if (command == "pending") {
+        require(cpu && machine, "pending requires machine mode");
+        uint64_t pending = number(input);
+        end(input);
+        require(pending <= 1, "invalid timer pending level");
+        cpu->get_state()->mip->backdoor_write_with_mask(1ULL << 7, pending << 7);
+        std::cout << "ok\n";
+      } else if (command == "machine") {
+        require(cpu && machine, "machine state requires machine mode");
+        end(input);
+        auto* state = cpu->get_state();
+        std::cout << "machine " << state->pc;
+        for (size_t i = 0; i < 32; ++i) std::cout << ' ' << state->XPR[i];
+        machine_state(state);
+        std::cout << '\n';
       } else if (command == "inspect") {
         require(bool(cpu), "not initialized");
         end(input);
-        auto pc = cpu->get_state()->pc;
+        auto* state = cpu->get_state();
+        // Skipping a platform instruction must not hide a DUT that missed an
+        // eligible interrupt, especially when that instruction is m5_exit.
+        require(!machine || !(state->mstatus->read() & (1ULL << 3)) ||
+                !(state->mie->read() & state->mip->read() & (1ULL << 7)),
+                "pending timer interrupt before platform instruction");
+        auto pc = state->pc;
         std::cout << "instruction " << pc << ' ' << memory.read(pc, 4) << '\n';
       } else if (command == "step") {
         require(bool(cpu), "not initialized");
@@ -152,6 +184,10 @@ int main() {
           }
           for (auto [address, value, size] : writes)
             std::cout << " write " << address << ' ' << unsigned(size) << ' ' << value;
+          if (machine) {
+            std::cout << " machine";
+            machine_state(state);
+          }
           std::cout << '\n';
         }
       } else if (command == "quit") {
