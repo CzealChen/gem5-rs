@@ -59,3 +59,36 @@ python -m tools.am_benchmark --input test --display
 当前 AM 平台实现位于 [workloads/am](../../workloads/am/README.md)。
 `third_party/abstract-machine` 保留所需上游头文件及 Makefile；`amdev.h` 声明
 设备接口，不会自动创建设备。实际使用的 klib 函数由项目平台代码实现。
+
+## 低成本检查 CPU 指令依赖
+
+在仓库根目录执行：
+
+```sh
+devenv shell -- python -m tools.am_audit
+```
+
+此命令排除 NEMU，使用各 kernel 的上游 Makefile 和现有 RV64I/LP64、`-O2`
+平台配置，只编译 C/C++ 目标文件，不链接、不仿真，也不生成图片或音视频资源。
+检查直接复用 blocking CPU 的指令语义函数，避免维护另一份支持指令表。
+结果写入 `target/am-audit/report.json`，各程序的编译日志也在同一目录。
+
+当前锁定版本的检查结果：10 个 kernel、31 个目标文件、12,398 条静态指令，
+全部编译成功，未发现不支持的指令。这里包括可能被链接器删除的代码，指令数
+不是动态执行次数。`external_dependencies` 列出尚未链接的外部符号，既包括
+已有平台函数，也包括待实现接口，不能直接当成缺失函数清单。
+
+主要的后续接入工作包括：
+
+- `yield-os` 的 `cte_init/kcontext/yield`；`thread-os` 还需要多处理器、
+  中断控制与 `atomic_xchg`。这些接口的未来实现可能引入新的指令需求。
+- 图形、音频、输入程序的 `ioe_read/ioe_write` 设备功能与资源打包。
+- 部分程序的 `malloc/free/rand/memcmp/memmove/sprintf` 等 klib 功能。
+  RV64I 下的乘除法会调用软件辅助函数，不意味着必须添加 M 扩展。
+
+直接运行也可以发现问题：CPU 遇到不支持的指令会返回 `IllegalInstruction`、
+故障 PC 和编码，再用 objdump 定位。但需要先链接成功，并且每次只覆盖实际
+执行路径，遇到第一个错误就停止。本次另将上游 `kernels/hello` 与现有平台链接
+并实际运行，成功退出（748 条指令）；这是一项独立冒烟验证，尚未增加通用 kernel
+运行入口。静态检查不代表其他 kernel 已可运行，也不覆盖尚未链接的 AM/klib
+实现、资源汇编或未来更换编译 ISA 后的结果。
