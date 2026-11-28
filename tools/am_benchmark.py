@@ -22,14 +22,17 @@ from gem5rs import (
     DifftestConfig,
     ExperimentConfig,
     FixedRam,
+    MachineTimer,
     Router,
     RunLimit,
     RunResult,
     Rv64Core,
     SimpleUart,
+    SimulatedTimerClock,
     SimulationError,
     StopReason,
     Tick,
+    WallTimerClock,
     am_test_platform,
 )
 
@@ -49,7 +52,7 @@ EXPECTED = (
     "md5",
 )
 DEFAULT_RAM_LATENCY = Tick(1000)
-type Workload = Literal["hello", "microbench", "yield-os"]
+type Workload = Literal["hello", "microbench", "yield-os", "thread-os"]
 type InputSize = Literal["test", "train", "ref", "huge"]
 HEAP_BYTES: dict[InputSize, int] = {
     "test": 128 * 1024,
@@ -69,6 +72,14 @@ def input_size(value: object) -> InputSize:
     if value == "huge":
         return "huge"
     raise ValueError("input must be test, train, ref or huge")
+
+
+def timer_clock(value: object) -> Literal["simulated", "wall"]:
+    if value == "simulated":
+        return "simulated"
+    if value == "wall":
+        return "wall"
+    raise ValueError("timer clock must be simulated or wall")
 
 
 def positive_option(value: object) -> int:
@@ -99,6 +110,8 @@ def build_guest(
     mainargs = input_size(mainargs)
     if workload != "microbench" and mainargs != "test":
         raise ValueError("input selection is only supported for microbench")
+    if workload == "thread-os" and platform.timer is None:
+        raise ValueError("thread-os requires a machine timer")
     compiler = subprocess.check_output(
         ["riscv64-none-elf-gcc", "--version"], text=True
     ).strip()
@@ -119,6 +132,8 @@ def build_guest(
     digest.update(
         platform.linker_script().encode() + workload.encode() + mainargs.encode()
     )
+    if workload == "thread-os":
+        digest.update(str(platform.timer_reload).encode())
     key = digest.hexdigest()
     work = ROOT / "target/am" / key
     elf = work / "build" / f"{workload}-riscv64-gem5rs.elf"
@@ -149,13 +164,17 @@ def build_guest(
         for name in ("runner.c", "hello.c"):
             shutil.copyfile(ROOT / "workloads/am" / name, work / name)
         (runtime / "mainargs.h").write_text(f'#define GEM5RS_MAINARGS "{mainargs}"\n')
-        if workload == "yield-os":
+        if workload in ("yield-os", "thread-os"):
             shutil.copyfile(
-                ROOT / "third_party/am-kernels/kernels/yield-os/yield-os.c",
-                work / "yield-os.c",
+                ROOT / f"third_party/am-kernels/kernels/{workload}/{workload}.c",
+                work / f"{workload}.c",
             )
             for name in ("cte.c", "trap.S"):
                 shutil.copyfile(ROOT / "workloads/am" / name, work / name)
+        if workload == "thread-os":
+            (work / "timer-config.h").write_text(
+                f"#define GEM5RS_TIMER_RELOAD UINT64_C({platform.timer_reload})\n"
+            )
         script = work / "platform.ld"
         script.write_text(platform.linker_script())
         env = os.environ.copy()
@@ -181,7 +200,9 @@ def build_guest(
         subprocess.run([*command, "image"], cwd=work, env=env, check=True)
         # LP64 (soft-float), no RVC; Rust additionally validates segments at build().
         attributes = elf.with_suffix(".attributes").read_text()
-        isa = "rv64i2p1_zicsr2p0" if workload == "yield-os" else "rv64i2p1"
+        isa = (
+            "rv64i2p1_zicsr2p0" if workload in ("yield-os", "thread-os") else "rv64i2p1"
+        )
         if not re.search(
             rf'Tag_RISCV_arch:\s+"{isa}"\s*$', attributes, re.MULTILINE
         ) or not re.search(r"Flags:\s+0x0\s*$", attributes, re.MULTILINE):
@@ -272,16 +293,57 @@ def run_guest(
         ),
         name="console",
     )
-    router = board.add(Router(1, [platform.ram, platform.console]), name="bus")
+    ranges = [platform.ram, platform.console]
+    if platform.timer is not None:
+        ranges.append(platform.timer)
+    router = board.add(Router(1, ranges), name="bus")
     board.connect(core.requests, router.inputs[0])
     board.connect(router.outputs[0], ram.input)
     board.connect(router.outputs[1], uart.input)
+    if platform.timer is not None:
+        clock = (
+            WallTimerClock(platform.timer_frequency_hz)
+            if platform.timer_clock == "wall"
+            else SimulatedTimerClock(platform.timer_tick_period)
+        )
+        timer = board.add(
+            MachineTimer(platform.timer.start, clock, platform.pio_latency),
+            name="timer",
+        )
+        board.connect(router.outputs[2], timer.input)
+        board.connect_interrupt(timer.interrupt, core.timer_interrupt)
     return board.build().run(
         RunLimit(platform.event_budget, platform.tick_budget, trace)
     )
 
 
 def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
+    if workload == "thread-os":
+        output = bytes(byte.value for byte in result.console).decode("ascii")
+        counts = {name: 0 for name in "ABCDE"}
+        lines = output.split("\n")
+        partial = lines.pop()
+        for line in lines:
+            match = re.fullmatch(r"Thread-([A-E]) on CPU #0", line)
+            if match is None:
+                raise ValueError(f"unexpected thread output: {line!r}")
+            counts[match[1]] += 1
+        if partial and not any(
+            f"Thread-{name} on CPU #0\n".startswith(partial) for name in counts
+        ):
+            raise ValueError(f"invalid partial thread output: {partial!r}")
+        if (
+            result.stop_reason != StopReason.INSTRUCTION_LIMIT
+            or result.fault is not None
+            or result.stats.timer_interrupts < 5
+            or min(counts.values()) < 2
+        ):
+            raise ValueError(
+                f"thread-os did not make five-thread progress: {result.stop_reason}, {counts}, interrupts={result.stats.timer_interrupts}, fault={result.fault}"
+            )
+        return [
+            {"name": f"thread-{name}", "status": "bounded-progress"} for name in counts
+        ]
     if workload == "yield-os":
         output = bytes(byte.value for byte in result.console).decode("ascii")
         if (
@@ -320,7 +382,9 @@ def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--workload", choices=("hello", "microbench", "yield-os"), default="microbench"
+        "--workload",
+        choices=("hello", "microbench", "yield-os", "thread-os"),
+        default="microbench",
     )
     parser.add_argument(
         "--input", choices=("test", "train", "ref", "huge"), default="test"
@@ -332,7 +396,25 @@ def main() -> None:
     )
     parser.add_argument("--instruction-budget", type=positive_int, default=None)
     parser.add_argument("--event-budget", type=positive_int, default=None)
-    parser.add_argument("--tick-budget", type=positive_int, default=10_000_000_000)
+    parser.add_argument("--tick-budget", type=positive_int, default=None)
+    parser.add_argument(
+        "--timer-clock",
+        choices=("simulated", "wall"),
+        default="simulated",
+        help="thread-os timer time source (default: simulated)",
+    )
+    parser.add_argument(
+        "--timer-frequency-hz",
+        type=positive_int,
+        default=1_000_000,
+        help="mtime counts per second (default: 1000000)",
+    )
+    parser.add_argument(
+        "--timer-interval-us",
+        type=positive_int,
+        default=1000,
+        help="guest timer rearm interval in microseconds (default: 1000)",
+    )
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--display", action="store_true")
     parser.add_argument(
@@ -345,13 +427,15 @@ def main() -> None:
     )
     args = parser.parse_args()
     raw_workload: object = args.workload
-    if raw_workload not in ("hello", "microbench", "yield-os"):
+    if raw_workload not in ("hello", "microbench", "yield-os", "thread-os"):
         raise ValueError("unsupported workload")
     workload: Workload = (
         "hello"
         if raw_workload == "hello"
         else "yield-os"
         if raw_workload == "yield-os"
+        else "thread-os"
+        if raw_workload == "thread-os"
         else "microbench"
     )
     destination: object = args.output
@@ -360,9 +444,9 @@ def main() -> None:
     mainargs = input_size(args.input)
     if workload != "microbench" and mainargs != "test":
         parser.error("--input is only supported for microbench")
-    if workload == "yield-os" and args.difftest:
+    if workload in ("yield-os", "thread-os") and args.difftest:
         parser.error(
-            "yield-os machine mode is not supported by the current difftest protocol"
+            "OS machine mode is not supported by the current difftest protocol"
         )
     base = am_test_platform()
     ram_mib = (
@@ -375,11 +459,31 @@ def main() -> None:
         ram=AddressRange(base.ram.start, ram_mib * 1024 * 1024),
         instruction_budget=positive_option(args.instruction_budget)
         if args.instruction_budget is not None
-        else (3_000_000 if workload == "yield-os" else base.instruction_budget),
+        else (
+            6_000_000
+            if workload == "thread-os"
+            else 3_000_000
+            if workload == "yield-os"
+            else base.instruction_budget
+        ),
         event_budget=positive_option(args.event_budget)
         if args.event_budget is not None
-        else (24_000_000 if workload == "yield-os" else base.event_budget),
-        tick_budget=Tick(positive_option(args.tick_budget)),
+        else (
+            48_000_000
+            if workload == "thread-os"
+            else 24_000_000
+            if workload == "yield-os"
+            else base.event_budget
+        ),
+        tick_budget=Tick(positive_option(args.tick_budget))
+        if args.tick_budget is not None
+        else Tick(20_000_000_000 if workload == "thread-os" else base.tick_budget),
+        timer=AddressRange(Address(0x0200_0000), 16)
+        if workload == "thread-os"
+        else None,
+        timer_clock=timer_clock(args.timer_clock),
+        timer_frequency_hz=positive_option(args.timer_frequency_hz),
+        timer_interval_us=positive_option(args.timer_interval_us),
     )
     build = build_guest(platform, workload, mainargs)
     if args.build_only:
@@ -395,7 +499,7 @@ def main() -> None:
             build.elf.read_bytes(),
             platform,
             difftest=difftest,
-            machine_mode=workload == "yield-os",
+            machine_mode=workload in ("yield-os", "thread-os"),
         )
     except SimulationError as error:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -424,8 +528,12 @@ def main() -> None:
     report: dict[str, object] = {
         "workload": workload,
         "mainargs": mainargs,
-        "expected_items": list(EXPECTED) if workload == "microbench" else [workload],
-        "machine_mode": workload == "yield-os",
+        "expected_items": list(EXPECTED)
+        if workload == "microbench"
+        else [f"thread-{name}" for name in "ABCDE"]
+        if workload == "thread-os"
+        else [workload],
+        "machine_mode": workload in ("yield-os", "thread-os"),
         "excluded_by_configuration": [],
         "build_key": build.key,
         "elf_sha256": build.elf_sha256,

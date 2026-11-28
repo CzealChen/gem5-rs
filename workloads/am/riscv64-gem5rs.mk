@@ -2,7 +2,7 @@
 CROSS_COMPILE := riscv64-none-elf-
 ARCH_H := arch/riscv.h
 ISA_FLAGS := rv64i
-ifeq ($(WORKLOAD),yield-os)
+ifneq ($(filter $(WORKLOAD),yield-os thread-os),)
 ISA_FLAGS := rv64i_zicsr
 endif
 COMMON := -march=$(ISA_FLAGS) -mabi=lp64 -mcmodel=medany -mno-relax -msmall-data-limit=0 -mstrict-align

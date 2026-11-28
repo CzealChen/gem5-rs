@@ -14,7 +14,9 @@ reference protocol, error injection and process failures. CI runs all three.
 AM acceptance compares hello and all ten test algorithms with Spike, checks
 difftest on/off invariance, and records protocol/source identity and sync counts.
 It also checks bounded `yield-os` progress, trace invariance, and rejection of
-unsupported machine-mode difftest.
+unsupported machine-mode difftest. Single-hart `thread-os` acceptance checks timer
+preemption, five-thread progress, deterministic replay, interrupt wiring, and an
+AM atomic/register-preservation probe.
 
 For interactive runs inside `devenv shell`:
 
@@ -127,19 +129,20 @@ boundaries are documented in [the adapter README](../../tools/spike/README.md).
 ## Cooperative OS workload
 
 `yield-os` compiles the unchanged upstream kernel with RV64I + Zicsr/LP64 and
-selects `Rv64Core(machine_mode=True)`; all other current workloads keep the default
-RV64I fault-stopping behavior. The native call signatures are unchanged: this
+selects `Rv64Core(machine_mode=True)`; `thread-os` uses the same mode plus a timer.
+The benchmark workloads keep the default RV64I fault-stopping behavior. The native call signatures are unchanged: this
 optional typed core setting is serialized through the existing board graph.
 
 The core supports M-only synchronous traps, direct `mtvec`, six CSR instruction
 forms, and `mret`. Implemented CSRs are `mstatus`, fixed `misa`, `mtvec`, `mscratch`,
-`mepc`, `mcause`, `mtval`, and read-only hart-zero `mhartid`. MPP is fixed to M;
+`mepc`, `mcause`, `mtval`, read-only hart-zero `mhartid`, `mie` (MTIE), and `mip`
+(read-only hardware MTIP; writes do not acknowledge the timer). MPP is fixed to M;
 unsupported status bits read zero, `mtvec` mode is fixed to direct and `mepc` is
 four-byte aligned. Unknown CSR accesses trap; write attempts to `mhartid` trap.
 Misalignment/access faults, illegal instructions, breakpoints and machine ecalls
 enter the guest handler without retiring the faulting instruction. Simulator
-protocol failures remain terminal. There are no asynchronous interrupts, U/S
-privilege modes, MMU or multicore support in this feature.
+protocol failures remain terminal. A connected machine timer can deliver interrupts.
+There are no U/S privilege modes, MMU or multicore support in this feature.
 
 `cte.c` implements `cte_init/kcontext/yield`; `trap.S` saves/restores all GPRs,
 original SP and machine return state, and switches to the context selected by the
@@ -156,5 +159,61 @@ instruction-budget stop, no fault, and at least four strictly alternating letter
 it reports `bounded-progress`, not successful guest termination. A smaller budget
 may be useful for diagnosis but will fail acceptance if it shows too little progress.
 `--difftest` is explicitly rejected for this mode until the reference protocol
-compares machine state and trap transitions. `thread-os` still requires timer
-preemption and the remaining AM interfaces.
+compares machine state and trap transitions. The same restriction applies to `thread-os`.
+
+## Single-hart preemption and timer clocks
+
+```sh
+python -m tools.am_benchmark --workload thread-os --timer-clock simulated --display
+python -m tools.am_benchmark --workload thread-os --timer-clock wall --timer-frequency-hz 1000000 --timer-interval-us 10000 --display
+```
+
+Both clock sources use one timer device with `mtime` at offset 0 (read-only) and
+`mtimecmp` at offset 8, initially `UINT64_MAX`. Accesses must be aligned 64-bit
+loads/stores; instruction fetches, partial accesses and writes to mtime fault.
+MMIO state changes and reads occur at transaction completion, after PIO latency.
+The AM profile places this 16-byte device at `0x02000000`; it is not a full CLINT.
+
+Python wires the memory request path normally and connects the dedicated typed
+ports with `board.connect_interrupt(timer.interrupt, core.timer_interrupt)`.
+`Board.add(Rv64Core(...))` now returns `CoreHandle`, a `RequestorHandle` subclass
+with the timer input; `Board.add(MachineTimer(...))` returns `TimerHandle` with
+MMIO input and interrupt output. A timer must connect to the board's single
+machine-mode core; missing, cross-board or wrong-direction wiring is rejected.
+Public native call signatures and `.pyi` remain unchanged; the board graph carries
+these models and connections. Installed-wheel typing checks cover both valid and
+invalid interrupt wiring.
+
+`SimulatedTimerClock(Tick(...))` selects an integer simulation-tick period.
+`WallTimerClock(frequency_hz=...)` selects Rust's monotonic `Instant` elapsed time,
+reset immediately before the event engine starts. Counter conversion uses integer
+arithmetic and floors fractional counts. Frequency and scheduling interval are
+independent: the CLI defaults to simulated time, 1 MHz, and 1000 μs; the wall
+example uses a 10000 μs quantum to reduce host-dependent preemption overhead.
+`BareMetalPlatform` resolves Hz to ticks and generates the authoritative timer
+symbol and guest reload count; inexact simulated periods or reload counts fail
+configuration validation. Clock selection alone does not change the guest ELF.
+
+The timer level is sampled at instruction execution boundaries. Pending interrupts
+survive masking; the in-flight memory instruction completes before any interrupt
+is taken. MIE and MTIE gate entry, trap entry masks MIE, and mret restores it.
+Only writing a future mtimecmp clears pending; CSR writes to mip do not. The
+handler rearms the device and dispatches `EVENT_IRQ_TIMER` without advancing mepc.
+This uses no per-timer-count events and does not implement WFI/idle wake-up.
+
+The single-hart AM implementation supplies `cpu_count/cpu_current/mpe_init`,
+`iset/ienabled` and an interrupt-protected `atomic_xchg` that restores the previous
+MIE state. This is not cross-hart synchronization and requires no A extension.
+The original thread-os source is unchanged. Its default budgets are 6 million
+retired instructions, 48 million events and 20 billion ticks. Acceptance requires
+an instruction-limit stop without faults, at least five timer interrupts, and
+at least two complete CPU-0 output lines from each of A–E. A trailing incomplete
+but valid line prefix is permitted; malformed or missing thread output is not.
+
+`timer_interrupts` is part of typed run statistics. Reports record clock source,
+frequency, interval, simulation ticks and host elapsed seconds separately. Wall
+clock execution is intentionally nondeterministic: host scheduling, logging and
+trace overhead change where interrupts occur. It does not pace the simulation to
+wall time. Deterministic regression/trace invariance use simulated clocks; wall
+clock runs may need a longer quantum or instruction budget to meet the same
+progress criteria. Both modes remain outside the current difftest protocol.

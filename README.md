@@ -26,3 +26,13 @@ python -m tools.am_benchmark --workload yield-os --display
 
 该无限循环程序以预算内的 `ABAB…` 交替进展验收；OS 模式暂不支持 difftest。
 其他 kernel 的接入状态见 [AM kernels 说明](third_party/am-kernels/README.md)。
+
+单核 `thread-os` 也已接入定时器抢占，时钟来源可选：
+
+```sh
+python -m tools.am_benchmark --workload thread-os --timer-clock simulated --display
+python -m tools.am_benchmark --workload thread-os --timer-clock wall --timer-interval-us 10000 --display
+```
+
+`simulated` 跟随仿真时间，`wall` 跟随主机单调墙钟；计数频率用
+`--timer-frequency-hz` 配置。墙钟模式的调度位置会随主机负载变化。

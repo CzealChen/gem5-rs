@@ -1,17 +1,61 @@
 """Installed-wheel AM acceptance, including trace invariance and failure cases."""
 
+import shutil
+import subprocess
 from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from am_benchmark import ROOT, InputSize, build_guest, run_guest, validate
 from gem5rs import (
+    Address,
     AddressRange,
+    BareMetalPlatform,
+    Board,
     ConfigurationError,
     DifftestConfig,
+    MachineTimer,
+    Rv64Core,
+    SimulatedTimerClock,
     SimulationError,
     StopReason,
     Tick,
     am_test_platform,
 )
+
+
+def check_timer_abi(source: Path, platform: BareMetalPlatform) -> None:
+    # Reuse the actual platform in an isolated finite AM ABI probe.
+    with TemporaryDirectory() as directory:
+        work = Path(directory)
+        (work / "src").mkdir()
+        am = work / "abstract-machine"
+        shutil.copytree(
+            source / "abstract-machine", am, ignore=shutil.ignore_patterns("build")
+        )
+        for name in ("cte.c", "trap.S", "timer-config.h", "platform.ld"):
+            shutil.copyfile(source / name, work / name)
+        shutil.copyfile(ROOT / "workloads/am/timer-check.c", work / "thread-os.c")
+        subprocess.run(
+            [
+                "make",
+                "-f",
+                str(ROOT / "workloads/am/Makefile"),
+                "WORKLOAD=thread-os",
+                f"AM_HOME={am}",
+                f"PLATFORM_LD={work / 'platform.ld'}",
+                "image",
+            ],
+            cwd=work,
+            check=True,
+        )
+        probe = run_guest(
+            (work / "build/thread-os-riscv64-gem5rs.elf").read_bytes(),
+            platform,
+            machine_mode=True,
+        )
+        assert probe.stop_reason == StopReason.EXIT and probe.exit_code == 0
+        assert probe.stats.timer_interrupts >= 3
 
 
 def main() -> None:
@@ -151,6 +195,80 @@ def main() -> None:
         assert "machine_mode" in str(error)
     else:
         raise AssertionError("unsupported OS difftest must reject before execution")
+    thread_platform = replace(
+        platform,
+        timer=AddressRange(Address(0x0200_0000), 16),
+        instruction_budget=6_000_000,
+        event_budget=48_000_000,
+        tick_budget=Tick(20_000_000_000),
+    )
+    threads = build_guest(thread_platform, "thread-os")
+    thread_result = run_guest(
+        threads.elf.read_bytes(), thread_platform, machine_mode=True
+    )
+    assert len(validate(thread_result, "thread-os")) == 5
+    assert thread_result.stats.timer_interrupts >= 5
+    assert (
+        run_guest(threads.elf.read_bytes(), thread_platform, machine_mode=True)
+        == thread_result
+    )
+    # Clock source is hardware configuration, not a change to the guest binary.
+    assert (
+        build_guest(
+            replace(thread_platform, timer_clock="wall"), "thread-os"
+        ).elf_sha256
+        == threads.elf_sha256
+    )
+    quick = replace(thread_platform, instruction_budget=100_000, timer_interval_us=10)
+    quick_guest = build_guest(quick, "thread-os")
+    check_timer_abi(quick_guest.elf.parent.parent, quick)
+    traced_timer = run_guest(
+        quick_guest.elf.read_bytes(), quick, machine_mode=True, trace=True
+    )
+    assert traced_timer.stats.timer_interrupts > 0
+    assert run_guest(quick_guest.elf.read_bytes(), quick, machine_mode=True) == replace(
+        traced_timer, transactions=(), commits=()
+    )
+    try:
+        validate(
+            replace(
+                thread_result, stats=replace(thread_result.stats, timer_interrupts=0)
+            ),
+            "thread-os",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("thread progress requires timer interrupts")
+    # IRQ configuration errors must fail before trying to run a guest.
+    for connected, enabled, foreign in (
+        (False, True, False),
+        (True, False, False),
+        (True, True, True),
+    ):
+        board = Board()
+        core_board = Board() if foreign else board
+        core = core_board.add(
+            Rv64Core(
+                threads.elf.read_bytes(),
+                thread_platform.stack_top,
+                machine_mode=enabled,
+            )
+        )
+        timer = board.add(
+            MachineTimer(
+                Address(0x0200_0000), SimulatedTimerClock(Tick(1000)), Tick(1000)
+            )
+        )
+        if connected:
+            board.connect_interrupt(timer.interrupt, core.timer_interrupt)
+        try:
+            board.build()
+        except ConfigurationError as error:
+            assert "interrupt" in str(error)
+        else:
+            raise AssertionError("invalid timer IRQ wiring accepted")
+    print("thread-os: five-thread timer preemption and deterministic replay passed")
     print("yield-os: repeated A/B context switches passed")
     print(
         f"AM test: ten self-checks passed, commits={result.stats.committed}, tick={result.final_tick}"

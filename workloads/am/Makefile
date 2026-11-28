@@ -6,8 +6,11 @@ SRCS := runner.c $(filter-out src/bench.c,$(shell find src/ -name "*.c" -o -name
 ifeq ($(WORKLOAD),hello)
 SRCS := hello.c
 endif
-ifeq ($(WORKLOAD),yield-os)
-SRCS := yield-os.c cte.c trap.S
+ifneq ($(filter $(WORKLOAD),yield-os thread-os),)
+SRCS := $(WORKLOAD).c cte.c trap.S
+ifeq ($(WORKLOAD),thread-os)
+CFLAGS += -DGEM5RS_TIMER
+endif
 endif
 INC_PATH := $(CURDIR)/include
 export ARCH AM_HOME PLATFORM_LD
