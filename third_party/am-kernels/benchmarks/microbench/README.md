@@ -42,7 +42,7 @@ python -m tools.am_benchmark --input train --instruction-budget 1000000000 --eve
 
 只编译可使用 `python -m tools.am_benchmark --workload microbench --build-only`。
 完整验收命令 `just check-am` 包含 difftest，不是关闭 difftest 的单次运行入口。
-平台与适配细节见 [AM 运行说明](../../../workloads/am/README.md)。
+平台与适配细节见 [AM 运行说明](../../../../workloads/am/README.md)。
 
 以下为上游使用说明，其中默认 `ref`、跳过内存不足项目等行为属于上游 runner。
 

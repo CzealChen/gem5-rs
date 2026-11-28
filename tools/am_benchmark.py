@@ -142,7 +142,7 @@ def build_guest(
         klib.mkdir()
         shutil.copyfile(ROOT / "workloads/am/klib.c", klib / "klib.c")
         shutil.copyfile(ROOT / "workloads/am/softarith.c", klib / "softarith.c")
-        upstream = ROOT / "third_party/am-kernels/microbench"
+        upstream = ROOT / "third_party/am-kernels/benchmarks/microbench"
         shutil.copytree(upstream / "include", work / "include")
         shutil.copyfile(upstream / "src/bench.c", work / "upstream_bench.c")
         shutil.copytree(upstream / "src", work / "src")
