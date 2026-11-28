@@ -52,6 +52,8 @@ EXPECTED = (
     "md5",
 )
 DEFAULT_RAM_LATENCY = Tick(1000)
+# The native engine uses u64 counters; no CLI budget means their full range.
+NATIVE_MAX = (1 << 64) - 1
 type Workload = Literal["hello", "microbench", "yield-os", "thread-os"]
 type InputSize = Literal["test", "train", "ref", "huge"]
 HEAP_BYTES: dict[InputSize, int] = {
@@ -279,7 +281,10 @@ def run_guest(
             difftest=difftest,
             machine_mode=machine_mode,
             experiment=ExperimentConfig(
-                platform.tick_femtoseconds, platform.instruction_budget
+                platform.tick_femtoseconds,
+                platform.instruction_budget
+                if platform.instruction_budget is not None
+                else NATIVE_MAX,
             )
             if platform.m5_enabled
             else None,
@@ -313,7 +318,13 @@ def run_guest(
         board.connect(router.outputs[2], timer.input)
         board.connect_interrupt(timer.interrupt, core.timer_interrupt)
     return board.build().run(
-        RunLimit(platform.event_budget, platform.tick_budget, trace)
+        RunLimit(
+            platform.event_budget if platform.event_budget is not None else NATIVE_MAX,
+            platform.tick_budget
+            if platform.tick_budget is not None
+            else Tick(NATIVE_MAX),
+            trace,
+        )
     )
 
 
@@ -394,9 +405,24 @@ def main() -> None:
         type=positive_int,
         help="RAM MiB (default: 128 for huge, otherwise 16)",
     )
-    parser.add_argument("--instruction-budget", type=positive_int, default=None)
-    parser.add_argument("--event-budget", type=positive_int, default=None)
-    parser.add_argument("--tick-budget", type=positive_int, default=None)
+    parser.add_argument(
+        "--instruction-budget",
+        type=positive_int,
+        default=None,
+        help="Instruction limit (default: unlimited)",
+    )
+    parser.add_argument(
+        "--event-budget",
+        type=positive_int,
+        default=None,
+        help="Event limit (default: unlimited)",
+    )
+    parser.add_argument(
+        "--tick-budget",
+        type=positive_int,
+        default=None,
+        help="Tick limit (default: unlimited)",
+    )
     parser.add_argument(
         "--timer-clock",
         choices=("simulated", "wall"),
@@ -459,25 +485,13 @@ def main() -> None:
         ram=AddressRange(base.ram.start, ram_mib * 1024 * 1024),
         instruction_budget=positive_option(args.instruction_budget)
         if args.instruction_budget is not None
-        else (
-            6_000_000
-            if workload == "thread-os"
-            else 3_000_000
-            if workload == "yield-os"
-            else base.instruction_budget
-        ),
+        else None,
         event_budget=positive_option(args.event_budget)
         if args.event_budget is not None
-        else (
-            48_000_000
-            if workload == "thread-os"
-            else 24_000_000
-            if workload == "yield-os"
-            else base.event_budget
-        ),
+        else None,
         tick_budget=Tick(positive_option(args.tick_budget))
         if args.tick_budget is not None
-        else Tick(20_000_000_000 if workload == "thread-os" else base.tick_budget),
+        else None,
         timer=AddressRange(Address(0x0200_0000), 16)
         if workload == "thread-os"
         else None,

@@ -99,14 +99,14 @@ devenv shell -- python -m tools.am_audit
 
 ```sh
 maturin develop --release
-python -m tools.am_benchmark --workload yield-os --display --output target/am-results/yield-os.json
+python -m tools.am_benchmark --workload yield-os --instruction-budget 3000000 --display --output target/am-results/yield-os.json
 ```
 
-程序使用上游未修改的 `kernels/yield-os/yield-os.c`。默认预算为 300 万条退休
-指令、2400 万事件、100 亿 ticks；已验证输出 `ABABAB`。程序是无限循环，报告
+程序使用上游未修改的 `kernels/yield-os/yield-os.c`。上述示例显式限制为 300 万条退休
+指令；已验证输出 `ABABAB`。所有预算默认无限，程序是无限循环，报告
 `instruction_limit` 和 `bounded-progress` 表示在预算内观察到了多次切换，
 不是 guest 正常退出。少于四个字符、非交替输出、异常或其他停止原因均不通过。
-可用现有预算参数调整运行长度；仅增大指令预算时也应注意 tick/event 上限。
+可用预算参数调整运行长度；未指定的预算不限制运行。
 
 CLI 为此 workload 自动开启 `Rv64Core(machine_mode=True)`。该选项默认关闭。
 当前实现单核、仅机器态、同步异常与 Zicsr：直接模式 `mtvec`、`mepc/mcause/mtval`、
@@ -126,10 +126,10 @@ trap 汇编参考固定版本 AbstractMachine 的 MIT 实现，保留版权与�
 
 ```sh
 # 跟随仿真时间；默认 1 MHz 计数频率、1 ms 调度周期
-python -m tools.am_benchmark --workload thread-os --timer-clock simulated --display --output target/am-results/thread-simulated.json
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock simulated --display --output target/am-results/thread-simulated.json
 
 # 跟随主机墙钟；这里选择已验证的 10 ms 调度周期
-python -m tools.am_benchmark --workload thread-os --timer-clock wall --timer-frequency-hz 1000000 --timer-interval-us 10000 --display --output target/am-results/thread-wall.json
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock wall --timer-frequency-hz 1000000 --timer-interval-us 10000 --display --output target/am-results/thread-wall.json
 ```
 
 | 参数 | 含义 | 默认值 |
@@ -149,7 +149,7 @@ python -m tools.am_benchmark --workload thread-os --timer-clock wall --timer-fre
 1 ms；墙钟模式中周期过短可能让固定指令预算主要消耗在抢占上，可像示例一样
 增加周期，或调整预算。不会因此放宽五线程进展的验收条件。
 
-`thread-os` 默认预算为 600 万条退休指令、4800 万事件、200 亿 ticks。验收要求
+`thread-os` 默认不限制运行；上述示例显式限制为 600 万条退休指令。验收要求
 无故障地达到指令上限、至少五次 timer 中断、A–E 每个线程至少输出两条完整的
 `Thread-X on CPU #0`。允许预算恰好截断末尾一条合法输出前缀；其他错误行会失败。
 它仍是无限循环，结果为 `bounded-progress`，不是正常退出或完整 OS 支持。

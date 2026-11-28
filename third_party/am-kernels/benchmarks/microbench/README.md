@@ -30,13 +30,14 @@ qsort、queen、bf、fib、sieve、15pz、dinic、lzip、ssort、md5，并检查
 
 ```sh
 python -m tools.am_benchmark --input train --build-only
-python -m tools.am_benchmark --input train --instruction-budget 1000000000 --event-budget 12000000000 --tick-budget 10000000000000 --display
+python -m tools.am_benchmark --input train --display
 ```
 
 `huge` 默认使用 128 MiB RAM，其余使用 16 MiB，可用 `--ram-mib` 覆盖。
 构建前选择的输入会写入 guest，参与构建缓存标识，报告的 `mainargs` 记录该选择。
-运行预算默认仍为 200 万条指令、1200 万事件、100 亿 ticks，适用于 `test`；
-较大输入需按实际运行调整上述预算，达到上限会报告失败，不会算作通过。
+默认不限制指令数、事件数或仿真时间，运行到 guest 退出或出错。
+需要限额时显式传入 `--instruction-budget`、`--event-budget`、`--tick-budget`；
+任一限额耗尽会停止并报告失败，不会算作通过。未指定的限额在 JSON 中记录为 `null`。
 当前已完整验收 `test`；其他规模只验证构建和限额启动，尚未完整跑完。
 当前模拟器会保留内部事务记录，长任务的主机内存占用会随执行增长。
 

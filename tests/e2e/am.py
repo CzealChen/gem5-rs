@@ -89,11 +89,17 @@ def main() -> None:
         raise AssertionError(
             "a matching illegal-instruction trap is not a successful benchmark"
         )
-    limited = run_guest(elf, replace(platform, tick_budget=Tick(1)))
+    unlimited = replace(
+        platform, instruction_budget=None, event_budget=None, tick_budget=None
+    )
+    assert run_guest(elf, unlimited) == summary
+    event_limited = run_guest(elf, replace(unlimited, event_budget=1))
+    assert event_limited.stop_reason == StopReason.EVENT_LIMIT
+    limited = run_guest(elf, replace(unlimited, tick_budget=Tick(1)))
     assert limited.stop_reason == StopReason.TICK_LIMIT
     assert limited.stats.committed == 0
     assert not limited.console
-    exhausted = run_guest(elf, replace(platform, instruction_budget=1))
+    exhausted = run_guest(elf, replace(unlimited, instruction_budget=1))
     assert exhausted.stop_reason == StopReason.INSTRUCTION_LIMIT
     assert exhausted.fault is None
     assert exhausted.stats.committed == 1

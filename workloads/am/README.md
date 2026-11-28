@@ -25,7 +25,7 @@ maturin develop --release
 python -m tools.am_benchmark --workload hello --display
 python -m tools.am_benchmark --workload microbench --difftest --display --output target/am-results/test.json
 python -m tools.am_benchmark --workload microbench --build-only
-python -m tools.am_benchmark --workload yield-os --display --output target/am-results/yield-os.json
+python -m tools.am_benchmark --workload yield-os --instruction-budget 3000000 --display --output target/am-results/yield-os.json
 ```
 
 ## Build and runtime boundary
@@ -60,7 +60,9 @@ Input selection is compiled into the runtime and included in the cache key.
 `huge` defaults to 128 MiB RAM; other inputs use 16 MiB. `--ram-mib` overrides
 this. Heap checks use the selected upstream requirements (128 KiB / 1 MiB /
 10 MiB / 64 MiB). `--instruction-budget`, `--event-budget` and `--tick-budget`
-allow longer runs; defaults remain bounded for test inputs. Larger inputs have
+set optional limits; all three default to unlimited in the CLI. Omitted limits
+are recorded as `null` and use the native engine’s full u64 counter range.
+The `am_test_platform()` fixture retains finite budgets for automated tests. Larger inputs have
 build/startup coverage, not full-suite acceptance.
 
 The build cache under `target/am/<sha256>/` includes all vendored and platform
@@ -153,8 +155,9 @@ and Zihao Yu, under [its MIT license](../../third_party/abstract-machine/LICENSE
 The original template's frame layout and SP/context switching are not copied
 unchanged. CPU CSR/trap semantics follow the [RISC-V Machine-Level ISA](https://docs.riscv.org/reference/isa/priv/machine.html).
 
-This upstream program never exits. The default 3 million retired instructions,
-24 million events and 10 billion ticks produce `ABABAB`. Acceptance requires an
+This upstream program never exits. The example explicitly limits execution to
+3 million retired instructions, producing `ABABAB`. Without a budget it keeps
+running. Acceptance requires an
 instruction-budget stop, no fault, and at least four strictly alternating letters;
 it reports `bounded-progress`, not successful guest termination. A smaller budget
 may be useful for diagnosis but will fail acceptance if it shows too little progress.
@@ -164,8 +167,8 @@ compares machine state and trap transitions. The same restriction applies to `th
 ## Single-hart preemption and timer clocks
 
 ```sh
-python -m tools.am_benchmark --workload thread-os --timer-clock simulated --display
-python -m tools.am_benchmark --workload thread-os --timer-clock wall --timer-frequency-hz 1000000 --timer-interval-us 10000 --display
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock simulated --display
+python -m tools.am_benchmark --workload thread-os --instruction-budget 6000000 --timer-clock wall --timer-frequency-hz 1000000 --timer-interval-us 10000 --display
 ```
 
 Both clock sources use one timer device with `mtime` at offset 0 (read-only) and
@@ -204,8 +207,8 @@ This uses no per-timer-count events and does not implement WFI/idle wake-up.
 The single-hart AM implementation supplies `cpu_count/cpu_current/mpe_init`,
 `iset/ienabled` and an interrupt-protected `atomic_xchg` that restores the previous
 MIE state. This is not cross-hart synchronization and requires no A extension.
-The original thread-os source is unchanged. Its default budgets are 6 million
-retired instructions, 48 million events and 20 billion ticks. Acceptance requires
+The original thread-os source is unchanged. The examples explicitly limit execution to 6 million
+retired instructions; without a budget it keeps running. Acceptance requires
 an instruction-limit stop without faults, at least five timer interrupts, and
 at least two complete CPU-0 output lines from each of A–E. A trailing incomplete
 but valid line prefix is permitted; malformed or missing thread output is not.

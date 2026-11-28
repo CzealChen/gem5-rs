@@ -33,6 +33,7 @@ class BareMetalPlatform:
 
     Time is an integer number of femtoseconds per tick. The explicit m5 flag
     belongs to the experiment, and is disabled unless requested by its caller.
+    A None budget means no configured limit (native u64 counter range).
     """
 
     ram: AddressRange
@@ -41,9 +42,9 @@ class BareMetalPlatform:
     tick_femtoseconds: int
     cpu_period: Tick
     pio_latency: Tick
-    tick_budget: Tick
-    event_budget: int
-    instruction_budget: int
+    tick_budget: Tick | None
+    event_budget: int | None
+    instruction_budget: int | None
     m5_enabled: bool = False
     timer: AddressRange | None = None
     timer_clock: Literal["simulated", "wall"] = "simulated"
@@ -62,11 +63,15 @@ class BareMetalPlatform:
             ("tick_femtoseconds", self.tick_femtoseconds),
             ("cpu_period", self.cpu_period),
             ("pio_latency", self.pio_latency),
+        ):
+            _positive_u64(name, value)
+        for name, budget in (
             ("tick_budget", self.tick_budget),
             ("event_budget", self.event_budget),
             ("instruction_budget", self.instruction_budget),
         ):
-            _positive_u64(name, value)
+            if budget is not None:
+                _positive_u64(name, budget)
         if self.stack_bytes % 16 or self.stack_bytes >= self.ram.size_bytes:
             raise ValueError(
                 "stack must be 16-byte aligned and leave room for the image"
@@ -90,7 +95,8 @@ class BareMetalPlatform:
             _positive_u64("timer_reload", self.timer_reload)
             if self.timer_clock == "simulated":
                 _ = self.timer_tick_period
-        self.nanoseconds(self.tick_budget)
+        if self.tick_budget is not None:
+            self.nanoseconds(self.tick_budget)
 
     @property
     def timer_reload(self) -> int:
