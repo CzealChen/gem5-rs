@@ -33,7 +33,12 @@ compilation, archive creation, dependency tracking and linking. The platform
 
 Guest inputs are vendored at fixed commits; see `../../third_party/README.md`
 (relative to the repository root: `third_party/README.md`) and `sources.json`.
-No source download is required during the checks. The AM/klib headers, algorithms,
+No source download is required during the checks.
+`third_party/abstract-machine/klib` contains upstream headers and archive build
+rules; the actual klib implementation lives in `workloads/am/klib.c` and
+`softarith.c`. `amdev.h` is included by `am.h` and declares device interfaces;
+only its uptime interface is implemented here. Other declarations do not add
+simulated devices. The AM/klib headers, algorithms,
 input settings, allocator, RNG and checksum helpers are unchanged. Project-owned
 startup, runtime and klib implement the functions actually used; no panic template
 or silent printf stub is linked. Unsupported formatting/IOE operations fail.
@@ -45,6 +50,13 @@ zero divisors and signed overflow through the helper ABI. Final ELF flags,
 architecture attributes, disassembly, stack/heap symbols and simulator load plan
 are checked before execution. m5 words are checked against generated `m5.S`;
 regenerate with `cargo run --bin m5-stubs > workloads/am/m5.S`.
+
+Input selection is compiled into the runtime and included in the cache key.
+`huge` defaults to 128 MiB RAM; other inputs use 16 MiB. `--ram-mib` overrides
+this. Heap checks use the selected upstream requirements (128 KiB / 1 MiB /
+10 MiB / 64 MiB). `--instruction-budget`, `--event-budget` and `--tick-budget`
+allow longer runs; defaults remain bounded for test inputs. Larger inputs have
+build/startup coverage, not full-suite acceptance.
 
 The build cache under `target/am/<sha256>/` includes all vendored and platform
 sources, the adapter, lockfile, compiler version and generated linker script.
@@ -65,7 +77,7 @@ never caches data, and does not interpret EOT as exit. A byte is recorded when
 the device accepts a write; its acknowledgement arrives after the PIO delay.
 Host display happens after simulation and cannot change the guest's behavior.
 
-`mainargs` is explicitly `test`. The complete upstream order is qsort, queen,
+`--input test|train|ref|huge` selects guest `mainargs` (default `test`). The complete upstream order is qsort, queen,
 bf, fib, sieve, 15pz, dinic, lzip, ssort, md5. The runner uses the upstream
 `BENCHMARK_LIST` directly, including the three C++ items and QuickLZ. Each
 item retains prepare/run/validate and the upstream test checksum. Memory shortage
@@ -89,7 +101,7 @@ ticks and commits; transaction counters are end-to-end, not ROI snapshots.
 difftest driver consumes each retirement immediately and keeps only 16 diagnostic
 instruction identities. The current Machine still retains internal transaction
 records until the run ends, so whole-simulator bounded memory remains follow-up
-work; this entry is intentionally restricted to test inputs.
+work; large inputs therefore require host-memory planning.
 
 ## Differential execution
 

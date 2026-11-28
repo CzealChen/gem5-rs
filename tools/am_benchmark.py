@@ -10,12 +10,13 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
 
 from gem5rs import (
     Address,
+    AddressRange,
     BareMetalPlatform,
     Board,
     DifftestConfig,
@@ -35,9 +36,52 @@ from gem5rs import (
 ROOT = Path(
     os.environ.get("GEM5RS_REPO_ROOT", str(Path(__file__).resolve().parents[1]))
 )
-EXPECTED = ("qsort", "queen", "bf", "fib", "sieve", "15pz", "dinic", "lzip", "ssort", "md5")
+EXPECTED = (
+    "qsort",
+    "queen",
+    "bf",
+    "fib",
+    "sieve",
+    "15pz",
+    "dinic",
+    "lzip",
+    "ssort",
+    "md5",
+)
 DEFAULT_RAM_LATENCY = Tick(1000)
 type Workload = Literal["hello", "microbench"]
+type InputSize = Literal["test", "train", "ref", "huge"]
+HEAP_BYTES: dict[InputSize, int] = {
+    "test": 128 * 1024,
+    "train": 1024 * 1024,
+    "ref": 10 * 1024 * 1024,
+    "huge": 64 * 1024 * 1024,
+}
+
+
+def input_size(value: object) -> InputSize:
+    if value == "test":
+        return "test"
+    if value == "train":
+        return "train"
+    if value == "ref":
+        return "ref"
+    if value == "huge":
+        return "huge"
+    raise ValueError("input must be test, train, ref or huge")
+
+
+def positive_option(value: object) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError("expected a positive integer option")
+    return value
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
 
 
 @dataclass(frozen=True)
@@ -48,8 +92,13 @@ class GuestBuild:
     elf_sha256: str
 
 
-def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
+def build_guest(
+    platform: BareMetalPlatform, workload: Workload, mainargs: InputSize = "test"
+) -> GuestBuild:
     """Content-address sources, overlay, layout and toolchain; let Make compile."""
+    mainargs = input_size(mainargs)
+    if workload == "hello" and mainargs != "test":
+        raise ValueError("input selection is only supported for microbench")
     compiler = subprocess.check_output(
         ["riscv64-none-elf-gcc", "--version"], text=True
     ).strip()
@@ -67,7 +116,9 @@ def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
     digest.update(Path(__file__).read_bytes())
     digest.update((ROOT / "devenv.lock").read_bytes())
     digest.update(compiler.encode())
-    digest.update(platform.linker_script().encode() + workload.encode())
+    digest.update(
+        platform.linker_script().encode() + workload.encode() + mainargs.encode()
+    )
     key = digest.hexdigest()
     work = ROOT / "target/am" / key
     elf = work / "build" / f"{workload}-riscv64-gem5rs.elf"
@@ -97,6 +148,7 @@ def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
         shutil.copytree(upstream / "src", work / "src")
         for name in ("runner.c", "hello.c"):
             shutil.copyfile(ROOT / "workloads/am" / name, work / name)
+        (runtime / "mainargs.h").write_text(f'#define GEM5RS_MAINARGS "{mainargs}"\n')
         script = work / "platform.ld"
         script.write_text(platform.linker_script())
         env = os.environ.copy()
@@ -139,7 +191,10 @@ def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
                 "_console",
             ):
                 addresses[fields[2]] = int(fields[0], 16)
-        platform.heap_bounds(Address(addresses["_heap_start"]), 128 * 1024)
+        platform.heap_bounds(
+            Address(addresses["_heap_start"]),
+            HEAP_BYTES[mainargs] if workload == "microbench" else 1024,
+        )
         if (addresses["_heap_end"], addresses["_stack_top"], addresses["_console"]) != (
             platform.stack_bottom,
             platform.stack_top,
@@ -245,6 +300,17 @@ def main() -> None:
     parser.add_argument(
         "--workload", choices=("hello", "microbench"), default="microbench"
     )
+    parser.add_argument(
+        "--input", choices=("test", "train", "ref", "huge"), default="test"
+    )
+    parser.add_argument(
+        "--ram-mib",
+        type=positive_int,
+        help="RAM MiB (default: 128 for huge, otherwise 16)",
+    )
+    parser.add_argument("--instruction-budget", type=positive_int, default=2_000_000)
+    parser.add_argument("--event-budget", type=positive_int, default=12_000_000)
+    parser.add_argument("--tick-budget", type=positive_int, default=10_000_000_000)
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--display", action="store_true")
     parser.add_argument(
@@ -263,8 +329,23 @@ def main() -> None:
     destination: object = args.output
     if not isinstance(destination, Path):
         raise TypeError("output must be a path")
-    platform = am_test_platform()
-    build = build_guest(platform, workload)
+    mainargs = input_size(args.input)
+    if workload == "hello" and mainargs != "test":
+        parser.error("--input is only supported for microbench")
+    base = am_test_platform()
+    ram_mib = (
+        positive_option(args.ram_mib)
+        if args.ram_mib is not None
+        else (128 if mainargs == "huge" else 16)
+    )
+    platform = replace(
+        base,
+        ram=AddressRange(base.ram.start, ram_mib * 1024 * 1024),
+        instruction_budget=positive_option(args.instruction_budget),
+        event_budget=positive_option(args.event_budget),
+        tick_budget=Tick(positive_option(args.tick_budget)),
+    )
+    build = build_guest(platform, workload, mainargs)
     if args.build_only:
         print(build.elf)
         return
@@ -281,6 +362,7 @@ def main() -> None:
             json.dumps(
                 {
                     "workload": workload,
+                    "mainargs": mainargs,
                     "elf_sha256": build.elf_sha256,
                     "configuration": asdict(platform),
                     "reference_configuration": None
@@ -300,7 +382,7 @@ def main() -> None:
         print(console, end="", flush=True)
     report: dict[str, object] = {
         "workload": workload,
-        "mainargs": "test",
+        "mainargs": mainargs,
         "expected_items": ["hello"] if workload == "hello" else list(EXPECTED),
         "excluded_by_configuration": [],
         "build_key": build.key,

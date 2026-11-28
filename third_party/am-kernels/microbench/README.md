@@ -23,8 +23,22 @@ python -m tools.am_benchmark --workload microbench --difftest --display --output
 
 这两个命令均通过 Makefile 编译 RV64I/LP64 guest，在当前 blocking CPU 上运行
 qsort、queen、bf、fib、sieve、15pz、dinic、lzip、ssort、md5，并检查每项的上游
-校验结果。当前适配固定使用 `test` 输入；内存不足、缺项或校验失败均视为失败。
+校验结果。默认使用 `test` 输入；内存不足、缺项或校验失败均视为失败。
 `--display` 显示 guest 输出，JSON 文件保存每项结果、ROI 和仿真统计。
+
+输入规模通过 `--input test|train|ref|huge` 选择，例如：
+
+```sh
+python -m tools.am_benchmark --input train --build-only
+python -m tools.am_benchmark --input train --instruction-budget 1000000000 --event-budget 12000000000 --tick-budget 10000000000000 --display
+```
+
+`huge` 默认使用 128 MiB RAM，其余使用 16 MiB，可用 `--ram-mib` 覆盖。
+构建前选择的输入会写入 guest，参与构建缓存标识，报告的 `mainargs` 记录该选择。
+运行预算默认仍为 200 万条指令、1200 万事件、100 亿 ticks，适用于 `test`；
+较大输入需按实际运行调整上述预算，达到上限会报告失败，不会算作通过。
+当前已完整验收 `test`；其他规模只验证构建和限额启动，尚未完整跑完。
+当前模拟器会保留内部事务记录，长任务的主机内存占用会随执行增长。
 
 只编译可使用 `python -m tools.am_benchmark --workload microbench --build-only`。
 完整验收命令 `just check-am` 包含 difftest，不是关闭 difftest 的单次运行入口。

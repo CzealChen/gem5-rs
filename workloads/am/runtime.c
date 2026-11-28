@@ -1,5 +1,6 @@
 #include <am.h>
 #include <klib.h>
+#include "mainargs.h"
 extern char _heap_start[], _heap_end[], _console[];
 Area heap;
 extern uint64_t m5_rpns(void);
@@ -23,5 +24,5 @@ void ioe_write(int reg, void *buf) {
 }
 void _trm_init(void) {
   heap = (Area){_heap_start, _heap_end};
-  halt(main("test"));
+  halt(main(GEM5RS_MAINARGS));
 }

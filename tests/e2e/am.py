@@ -2,8 +2,15 @@
 
 from dataclasses import replace
 
-from am_benchmark import ROOT, build_guest, run_guest, validate
-from gem5rs import DifftestConfig, SimulationError, StopReason, Tick, am_test_platform
+from am_benchmark import ROOT, InputSize, build_guest, run_guest, validate
+from gem5rs import (
+    AddressRange,
+    DifftestConfig,
+    SimulationError,
+    StopReason,
+    Tick,
+    am_test_platform,
+)
 
 
 def main() -> None:
@@ -83,6 +90,30 @@ def main() -> None:
         pass
     else:
         raise AssertionError("zero exit without per-item validation must fail")
+    # Larger inputs must produce distinct guests and remain budget bounded.
+    sizes: tuple[InputSize, ...] = ("train", "ref", "huge")
+    hashes = {benchmark.elf_sha256}
+    for size in sizes:
+        larger = (
+            replace(platform, ram=AddressRange(platform.ram.start, 128 * 1024 * 1024))
+            if size == "huge"
+            else platform
+        )
+        guest = build_guest(larger, "microbench", size)
+        assert guest.elf_sha256 not in hashes
+        hashes.add(guest.elf_sha256)
+        bounded = run_guest(
+            guest.elf.read_bytes(), replace(larger, instruction_budget=5000)
+        )
+        assert bounded.stop_reason == StopReason.INSTRUCTION_LIMIT
+        assert bounded.stats.committed == 5000
+        assert bounded.fault is None
+    try:
+        build_guest(platform, "microbench", "huge")
+    except ValueError as error:
+        assert "required heap" in str(error)
+    else:
+        raise AssertionError("huge must reject insufficient RAM before simulation")
     print(
         f"AM test: ten self-checks passed, commits={result.stats.committed}, tick={result.final_tick}"
     )
