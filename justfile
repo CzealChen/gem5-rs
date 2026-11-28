@@ -3,3 +3,6 @@ check-mvp:
 
 check-spike-probe:
     bash tools/check-spike-probe.sh
+
+check-am:
+    bash tools/check-am.sh

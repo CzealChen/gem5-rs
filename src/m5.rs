@@ -48,7 +48,7 @@ impl Operation {
     }
 }
 
-/// Emit stubs from the same operation table used by the future shared decoder.
+/// Emit stubs from the same operation table used by the shared decoder.
 /// This is a build artifact; guest sources must not maintain duplicate opcodes.
 pub fn guest_assembly() -> String {
     use std::fmt::Write;

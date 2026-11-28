@@ -25,3 +25,9 @@ mypy --strict -m tools.spike_trace -m workloads.test_spike_trace
 Spike 运行其 reset ROM（ROM 使用 Zicsr），启动代码随后初始化 ROM 修改的 `t0`、`a0` 和 `a1`，使 Spike 与从 ELF 入口直接启动的机器进入同一初始状态。参考轨迹从 `_start` 开始，按 PC、指令字和整数寄存器写回逐条比较，在首个退出写之前结束。Spike 用一页 RAM 捕获退出写，报告对应指令位置与写入值。
 
 集成调用：`run_spike(Path(...))` 取得参考轨迹，`compare_trace(reference, actual)` 接收含退出写提交的模拟器轨迹，返回首个差异诊断或 `None`。最后一条退出写按 PC 和指令字检查；将平台报告的退出结果与参考轨迹的 `exit_code` 单独比较。
+
+## AM MicroBench
+
+AM 使用独立的 16 MiB 平台、上游 Makefile、console 与显式 m5 指令扩展。
+`devenv shell -- just check-am` 验证四个 test 算法；详见 [AM 入口](am/README.md)。
+此入口不使用本页的离线 Spike CLI，也不改变原有 4 KiB 裸机基线。

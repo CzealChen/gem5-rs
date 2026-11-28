@@ -1,60 +1,61 @@
 # AM 实施进度
 
-按 `am_benchmark_plan.md` 的依赖顺序交付；“完成一项”不代表所在阶段已验收。
+## 当前交付与顺序调整
 
-## A0 已完成的独立准备
+用户明确选择：先在当前阻塞 CPU 实现 benchmark，guest 使用 Makefile，
+不以 P2 重构作为本次前置条件。长期模块边界仍保留，后续迁移复用这些能力。
 
-- `workloads/am/sources.json` 固定四个上游源码版本。尚未导入 AM 算法和 klib，
-  也未声称完成逐文件许可审计、移植补丁或 guest 构建缓存。
-- 真实 Spike 能力原型及逐条 Rust ISA 对比：见 `tools/spike/README.md`。
-- Python `BareMetalPlatform` 和 `am_test_platform()`：RAM、console、栈、时间
-  单位、CPU/PIO 延迟及三类预算集中定义；校验地址重叠、溢出、栈堆和时间换算。
-  `linker_script()` 从同一个对象派生布局；P2 装配与参考初始化还没有消费者。
-- Rust `m5::Operation` 单一 ABI 表及 guest stub 生成函数；普通 RV64I 默认仍
-  拒绝所有五种 m5 指令。未将这些操作接入旧 CPU 或旧 Machine。
+已完成：
 
-## 固定的 m5 ABI
+- A0 独立 Spike 能力探针：真实单步、完整 PC/GPR 同步、访存记录、EBREAK
+  原因/PC 获取。见 `tools/spike/README.md`；它不是 AM 的生产差分驱动。
+- 独立实验控制器及共享 m5 ABI，当前阻塞核在不可推测提交边界执行服务。
+  扩展默认关闭；未知编码、非法参数、嵌套/不配对 ROI 明确失败。
+- SimpleUart 输出子集，通过正常 Target 接口接受写入，接受时记录字节，延迟
+  后响应；拒收不输出，EOT 不退出，非法宽度/读取/取指拒绝。
+- Python 具名平台、ELF 栈堆布局校验、类型化 console/ROI 结果及三类预算。
+  失败退出与正常退出区分，退出指令先提交再停止，普通 EBREAK/ECALL 语义不变。
+- 保留上游 AM Makefile 的 guest 构建适配。固定来源、逐文件许可说明、RV64I
+  软件乘除、启动/IOE/klib 子集、构建缓存和独立实验报告。
+- hello/time/ROI 小程序及 queen/qsort/sieve/md5 的原始 test 输入与自检。
+  实际运行四项全部通过；执行顺序明确为 queen、qsort、sieve、md5。
+- `just check-am`：release wheel 安装后 strict mypy、正反配置场景、预算、
+  轨迹开关不变性、不同 RAM 延迟下同一 ELF 的自检；CI 加入统一检查。
 
-依据 gem5 `9d368896ce119c17e1289dcbb18f33624724b843` 的
-`include/gem5/asm/generic/m5ops.h`、`util/m5/src/abi/riscv/m5op.S`、
-`src/arch/riscv/isa/formats/m5ops.isa`。RV64 指令为
-`0x7b | (operation << 25)`；参数按 a0/a1 传递，结果总是写回 a0。
+## m5 ABI
 
-| 操作 | 编号 | 指令 | 参数 | 结果/限制 |
-| --- | --- | --- | --- | --- |
-| rpns | 0x07 | 0x0e00007b | 无 | 模拟纳秒，向下取整 |
-| exit | 0x21 | 0x4200007b | a0=delay | 仅 delay=0，a0 写零 |
-| fail | 0x22 | 0x4400007b | a0=delay, a1=code | 仅 delay=0，保留 64 位 code，a0 写零 |
-| work_begin | 0x5a | 0xb400007b | a0=id, a1=threadid | threadid=0，不嵌套，a0 写零 |
-| work_end | 0x5b | 0xb600007b | a0=id, a1=threadid | 配对 id，threadid=0，a0 写零 |
+固定依据为 gem5 `9d368896ce119c17e1289dcbb18f33624724b843` 的 m5ops.h、
+RISC-V m5op.S 和 m5ops.isa。指令为 `0x7b | (operation << 25)`；a0/a1 传参，
+所有成功操作均写回 a0。`src/m5.rs` 是操作表权威，guest 汇编通过生成及测试核对。
 
-以上表格冻结目标语义，当前仅实现 ABI 定义。实验控制器、参数验证、不可推测
-服务、ROI 快照与 console 副作用需要 A1/A2 的独立测试后才算实现。
+| 操作 | 编号 | 指令 | 约束 |
+| --- | --- | --- | --- |
+| rpns | 0x07 | 0x0e00007b | tick 的物理时间换算为 ns，向下取整 |
+| exit | 0x21 | 0x4200007b | delay=0，a0 写零 |
+| fail | 0x22 | 0x4400007b | delay=0，完整 64 位失败码，a0 写零 |
+| work_begin | 0x5a | 0xb400007b | threadid=0，不嵌套 |
+| work_end | 0x5b | 0xb600007b | threadid=0，id 配对 |
 
-## 尚未通过的阶段门槛
+ROI commits 不包含两条标记；标记之间的 call/ret 等普通指令计入。
+当前 ROI 提供 tick 和 commits；事务统计是端到端口径。
 
-A0 仍依赖 P2 M0 契约定案；生产参考协议及统一初始化由 A3 收敛，原型不能替代。
-A1 依赖 P2 M1 的 System/组件/提交接口；A2 还依赖 M2 的逐跳端口与互连。
-当前仓库仅有旧 Machine，不在其上添加临时 AM runtime。
-A4 的四个算法和 A5 的四种模型组合均未实现或验收。
+## 验证边界和后续阶段
 
-复现现有检查：
+本次交付是“当前阻塞核 + Makefile + 四项自检”，不是原计划 A0–A5 全部完成。
+A3 的正式流式 Spike 协议、故障注入及平台操作同步尚未接入 AM；报告明确写
+`difftest: false`。A5 的 FiveStage/L1 四种组合仍依赖 P2。完整 suite/train、
+ROI 事务计数快照、最终一致数据观察也未交付。
+
+当前 trace=False 只省略返回给 Python 的轨迹，旧 Machine 仍在运行期间保留
+事务记录。流式观察与有界日志需要后续实现，不能据此宣称支持 train 规模。
+
+复现：
 
 ```
-devenv shell -- just check-spike-probe
 devenv shell -- just check-mvp
+devenv shell -- just check-am
+devenv shell -- just check-spike-probe
 ```
 
-第二条包含安装 wheel 后的配置测试和 `mypy --strict`。完整 AM 的 CI、guest
-编译、流式差分和组合报告需在后续阶段加入，当前检查不可称为 AM benchmark 通过。
-
-## 实施顺序调整：当前阻塞核优先
-
-用户后续明确选择先在当前 Blocking CPU 接入 benchmark，guest 使用 Makefile，
-不再以 P2 M0–M4 为本次前置门槛。原计划的长期模块方向保留；本次实现复用当前
-Source/MemoryTarget 接口，不新增 CPU 或事件内核副本。
-
-当前已实现共享 m5 ABI、独立实验控制器、提交时退出与 ROI、正常事务路径上的
-输出设备及类型化 Board 配置/结果。设备新增通用 accepted 通知，以区分字符
-产生与响应完成；既有 RAM 完成时读写语义不变。指令、tick 和 event 预算分别
-报告，m5_fail 保留完整失败码，普通 EBREAK/ECALL 不变。
+产物和用法见 `workloads/am/README.md`。CI 配置已加入；本地验证不代表已运行
+远端 CI。原有 4 KiB/Exit 基线仍独立保留。

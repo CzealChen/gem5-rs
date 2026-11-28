@@ -15,5 +15,10 @@
     "repository": "https://github.com/riscv-software-src/riscv-isa-sim",
     "commit": "d140cbc0ae4ef4fc64ad323f3f175ff15f6dca56",
     "nix_source_nar_hash": "sha256-chyTl7v7pZUGcRczzrawLOYxSYbbk7eWohcbduU7VBU="
+  },
+  "md5-origin": {
+    "repository": "https://github.com/pod32g/md5",
+    "commit": "27d3b3d87c9a82cfb1c140a404b1ac2585d95dd4",
+    "license": "Apache-2.0"
   }
 }

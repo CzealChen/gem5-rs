@@ -1,7 +1,7 @@
-"""Resolved bare-metal layout shared by guest build and future P2 assembly.
+"""Resolved bare-metal layout shared by guest build and board assembly.
 
-This configuration does not enable AM on the legacy Machine. Runtime models
-consume it only after the P2 component/transaction interfaces are available.
+The AM runner maps this configuration to the current blocking core and targets.
+The layout and physical time units are independent of the CPU implementation.
 """
 
 from dataclasses import dataclass
