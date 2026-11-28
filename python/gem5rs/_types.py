@@ -62,12 +62,21 @@ class ExperimentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DifftestConfig:
+    adapter: str
+    timeout_ms: int = 5000
+    expected_exit_code: int = 0
+    expected_failure: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Rv64Core:
     elf: bytes
     stack_pointer: Address
     cycle: Tick = Tick(1)
     experiment: ExperimentConfig | None = None
     stack_bytes: int = 16
+    difftest: DifftestConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +202,18 @@ class RunResult:
     stats: Statistics
     console: tuple[ConsoleByte, ...] = ()
     regions: tuple[Region, ...] = ()
+    difftest: DifftestStatistics | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DifftestStatistics:
+    protocol_version: int
+    reference_commit: str
+    compared: int
+    synced_m5: int
+    synced_console: int
+    synced_exit: int
+    passed: bool
 
 
 @dataclass(frozen=True, slots=True)

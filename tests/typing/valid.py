@@ -5,6 +5,7 @@ from gem5rs import (
     AddressRange,
     Board,
     Commit,
+    DifftestStatistics,
     DualBankRam,
     Exit,
     Fault,
@@ -75,3 +76,4 @@ def assemble(elf: bytes) -> None:
     assert_type(result.commits, tuple[Commit, ...])
     assert_type(result.commits[0].pc, Address)
     assert_type(result.stats, Statistics)
+    assert_type(result.difftest, DifftestStatistics | None)

@@ -15,4 +15,4 @@ devenv shell -- just check-am
 ```
 
 使用上游 Makefile 编译 RV64I guest，生成逐项自检、ROI 和端到端 JSON 报告。
-构建方式、参数和当前验证边界见 [AM 入口](workloads/am/README.md)；目前未接入 AM 的 Spike 流式差分。
+构建方式、参数和当前验证边界见 [AM 入口](workloads/am/README.md)；验收包含 AM 的逐指令 Spike 流式差分。

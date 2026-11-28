@@ -55,7 +55,7 @@ struct Stats {
     fetches: u64,
     reads: u64,
     writes: u64,
-    committed: usize,
+    committed: u64,
 }
 
 #[derive(Serialize)]
@@ -72,14 +72,16 @@ struct Transaction<'a> {
 }
 
 pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<String, RunError> {
+    let driver = start_reference(plan)?;
     let mut cpu = plan.sources.iter().find_map(|req| match &req.source {
         Source::Core {
             image,
             stack_pointer,
             cycle,
             experiment,
+            ..
         } => {
-            let cpu = Cpu::new(image.entry, *stack_pointer, *cycle);
+            let cpu = Cpu::new(image.entry, *stack_pointer, *cycle).with_trace(trace);
             Some(match experiment {
                 Some(config) => cpu.with_experiment(
                     crate::experiment::Experiment::new(*config).expect("validated config"),
@@ -89,6 +91,13 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
         }
         _ => None,
     });
+    if let Some(driver) = &driver {
+        cpu = Some(
+            cpu.take()
+                .unwrap()
+                .with_observer(crate::observation::Shared(driver.clone())),
+        );
+    }
     let deliveries = DeliveryLog::default();
     let console = RefCell::new(Vec::new());
     let mut machine = memory::Machine::new(plan.sources.iter().map(|req| req.id).collect())?;
@@ -164,6 +173,32 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
         .context(EngineSnafu {
             location: "event queue",
         })?;
+    if let Some(error) = cpu.as_ref().and_then(Cpu::observation_error) {
+        return Err(error.to_owned().into());
+    }
+    let difftest = if let Some(driver) = driver {
+        let exit = match result.stop {
+            memory::StopReason::Exit(code) => Some(
+                cpu.as_ref()
+                    .and_then(Cpu::experiment)
+                    .and_then(crate::experiment::Experiment::exit)
+                    .unwrap_or(crate::experiment::Exit {
+                        code,
+                        failed: false,
+                    }),
+            ),
+            _ => None,
+        };
+        Some(driver.borrow_mut().finish(exit).map_err(|error| {
+            RunError::from(format!(
+                "{error}; DUT stop={:?}, fault={:?}",
+                result.stop,
+                cpu.as_ref().and_then(Cpu::fault)
+            ))
+        })?)
+    } else {
+        None
+    };
     encode(
         &result,
         deliveries.into_inner(),
@@ -171,6 +206,7 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
         cpu.as_ref(),
         console.into_inner(),
         trace,
+        difftest,
     )
 }
 
@@ -181,11 +217,12 @@ fn encode(
     cpu: Option<&Cpu>,
     console: Vec<crate::console::Byte>,
     trace: bool,
+    difftest: Option<crate::difftest::Statistics>,
 ) -> Result<String, RunError> {
     let commits = cpu.map_or(&[][..], Cpu::commits);
     let mut stats = Stats {
         events: result.events,
-        committed: commits.len(),
+        committed: cpu.map_or(0, Cpu::committed),
         ..Stats::default()
     };
     let mut responses = BTreeMap::<_, VecDeque<_>>::new();
@@ -295,6 +332,7 @@ fn encode(
         commits: if trace { commits } else { &[] },
         stats,
         console,
+        difftest,
         regions: cpu
             .and_then(Cpu::experiment)
             .map_or(&[], crate::experiment::Experiment::regions),
@@ -337,4 +375,50 @@ struct Report<'a> {
     stats: Stats,
     console: Vec<crate::console::Byte>,
     regions: &'a [crate::experiment::Region],
+    difftest: Option<crate::difftest::Statistics>,
+}
+
+fn start_reference(
+    plan: &Plan,
+) -> Result<Option<std::rc::Rc<RefCell<crate::difftest::Driver>>>, RunError> {
+    let Some((image, config)) = plan.sources.iter().find_map(|source| match &source.source {
+        Source::Core {
+            image,
+            difftest: Some(config),
+            ..
+        } => Some((image, config)),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    if plan.sources.len() != 1 {
+        return Err("difftest requires one core and no other RAM writers"
+            .to_string()
+            .into());
+    }
+    let mut ram = None;
+    let mut platform = crate::difftest::Platform::default();
+    for mount in &plan.routes {
+        match mount.target {
+            MountTarget::Console { base, .. } => platform.console.push(base),
+            MountTarget::Memory(memory::Route { base, target }) => match target {
+                memory::Target::FixedRam { size_bytes, .. }
+                | memory::Target::BankedRam { size_bytes, .. } => {
+                    if ram.replace(base..base + size_bytes as u64).is_some() {
+                        return Err("difftest currently requires a single contiguous RAM"
+                            .to_string()
+                            .into());
+                    }
+                }
+                memory::Target::ExitMmio { width, .. } => platform.exit.push((base, width)),
+            },
+        }
+    }
+    let driver = crate::difftest::Driver::start(
+        config.clone(),
+        ram.ok_or_else(|| RunError::from("difftest needs RAM".to_string()))?,
+        image,
+        platform,
+    )?;
+    Ok(Some(std::rc::Rc::new(RefCell::new(driver))))
 }

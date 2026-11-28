@@ -78,7 +78,7 @@ def _node(model: _Model) -> dict[str, object]:
                 "size_bytes": size_bytes,
                 "latency": latency,
             }
-        case Rv64Core(elf, stack_pointer, cycle, experiment, stack_bytes):
+        case Rv64Core(elf, stack_pointer, cycle, experiment, stack_bytes, difftest):
             return {
                 "kind": "rv64_core",
                 "elf": list(elf),
@@ -91,6 +91,14 @@ def _node(model: _Model) -> dict[str, object]:
                     "instruction_budget": experiment.instruction_budget,
                 },
                 "stack_bytes": stack_bytes,
+                "difftest": None
+                if difftest is None
+                else {
+                    "adapter": difftest.adapter,
+                    "timeout_ms": difftest.timeout_ms,
+                    "expected_exit_code": difftest.expected_exit_code,
+                    "expected_failure": difftest.expected_failure,
+                },
             }
         case Router(inputs, ranges, priority):
             return {

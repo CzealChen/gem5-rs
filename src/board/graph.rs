@@ -38,6 +38,8 @@ enum Model {
         experiment: Option<crate::experiment::Config>,
         #[serde(default = "default_stack")]
         stack_bytes: u64,
+        #[serde(default)]
+        difftest: Option<crate::difftest::Config>,
     },
     FixedRam {
         size_bytes: u64,
@@ -121,6 +123,7 @@ pub(super) enum Source {
         stack_pointer: u64,
         cycle: u64,
         experiment: Option<crate::experiment::Config>,
+        difftest: Option<crate::difftest::Config>,
     },
 }
 
@@ -361,6 +364,7 @@ impl Graph {
                         cycle,
                         experiment,
                         stack_bytes,
+                        difftest,
                     } => {
                         if std::mem::replace(&mut has_core, true) {
                             return Err(ConfigError::from(format!(
@@ -382,6 +386,10 @@ impl Graph {
                             cycle: *cycle,
                             experiment: experiment
                                 .map(crate::experiment::Config::validate)
+                                .transpose()?,
+                            difftest: difftest
+                                .clone()
+                                .map(crate::difftest::Config::validate)
                                 .transpose()?,
                         }
                     }

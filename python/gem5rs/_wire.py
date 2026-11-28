@@ -6,6 +6,7 @@ from ._types import (
     Address,
     Commit,
     ConsoleByte,
+    DifftestStatistics,
     Fault,
     Region,
     RegisterWrite,
@@ -124,12 +125,31 @@ def decode_result(payload: str) -> RunResult:
         stats=_statistics(result["stats"]),
         console=tuple(_console(byte) for byte in _items(result.get("console", []))),
         regions=tuple(_region(region) for region in _items(result.get("regions", []))),
+        difftest=_difftest(result.get("difftest")),
     )
 
 
 def _console(value: object) -> ConsoleByte:
     byte = _record(value)
     return ConsoleByte(Tick(_uint(byte["at"])), _uint(byte["value"], 255))
+
+
+def _difftest(value: object) -> DifftestStatistics | None:
+    if value is None:
+        return None
+    stats = _record(value)
+    passed = stats["passed"]
+    if not isinstance(passed, bool):
+        raise ValueError("difftest passed must be a boolean")
+    return DifftestStatistics(
+        _uint(stats["protocol_version"]),
+        _text(stats["reference_commit"]),
+        _uint(stats["compared"]),
+        _uint(stats["synced_m5"]),
+        _uint(stats["synced_console"]),
+        _uint(stats["synced_exit"]),
+        passed,
+    )
 
 
 def _region(value: object) -> Region:

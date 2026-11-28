@@ -7,8 +7,9 @@
 
 已完成：
 
-- A0 独立 Spike 能力探针：真实单步、完整 PC/GPR 同步、访存记录、EBREAK
-  原因/PC 获取。见 `tools/spike/README.md`；它不是 AM 的生产差分驱动。
+- A3 正式 Spike 独立进程与 Rust 流式差分：版本握手、相同 ELF 初态、普通指令
+  PC/GPR/访存逐条比较、白名单完整状态同步、架构故障核对、超时和异常清理。
+  A0 原型已移除，统一为 `tools/spike/adapter.cc`；协议见 `tools/spike/README.md`。
 - 独立实验控制器及共享 m5 ABI，当前阻塞核在不可推测提交边界执行服务。
   扩展默认关闭；未知编码、非法参数、嵌套/不配对 ROI 明确失败。
 - SimpleUart 输出子集，通过正常 Target 接口接受写入，接受时记录字节，延迟
@@ -20,7 +21,8 @@
 - hello/time/ROI 小程序及 queen/qsort/sieve/md5 的原始 test 输入与自检。
   实际运行四项全部通过；执行顺序明确为 queen、qsort、sieve、md5。
 - `just check-am`：release wheel 安装后 strict mypy、正反配置场景、预算、
-  轨迹开关不变性、不同 RAM 延迟下同一 ELF 的自检；CI 加入统一检查。
+  轨迹开关不变性、不同 RAM 延迟下同一 ELF 的自检；同一 ELF 差分开关不改变
+  模拟结果。`just check-spike` 验证错误注入、连续同步及协议失败；CI 统一执行。
 
 ## m5 ABI
 
@@ -41,20 +43,21 @@ ROI commits 不包含两条标记；标记之间的 call/ret 等普通指令计�
 
 ## 验证边界和后续阶段
 
-本次交付是“当前阻塞核 + Makefile + 四项自检”，不是原计划 A0–A5 全部完成。
-A3 的正式流式 Spike 协议、故障注入及平台操作同步尚未接入 AM；报告明确写
-`difftest: false`。A5 的 FiveStage/L1 四种组合仍依赖 P2。完整 suite/train、
-ROI 事务计数快照、最终一致数据观察也未交付。
+当前已交付“阻塞核 + Makefile + 四项自检 + Spike 流式差分”。实测四项合计
+124,515 条提交：124,416 条普通比较、9 次 m5 同步、90 次 console 同步。
+差分开关下模拟时间均为 286,767,000 tick；这不是周期正确性的独立证明。
+A5 的 FiveStage/L1 四种组合仍依赖 P2。完整 suite/train、ROI 事务计数快照、
+最终一致数据观察也未交付，不能报告原计划 A0–A5 全部完成。
 
-当前 trace=False 只省略返回给 Python 的轨迹，旧 Machine 仍在运行期间保留
-事务记录。流式观察与有界日志需要后续实现，不能据此宣称支持 train 规模。
+当前 trace=False 禁用 CPU 提交记录保存，差分仅保留 16 条诊断上下文；旧
+Machine 仍在运行期间保留事务记录。不能据此宣称全模拟器内存有界或支持 train。
 
 复现：
 
 ```
 devenv shell -- just check-mvp
 devenv shell -- just check-am
-devenv shell -- just check-spike-probe
+devenv shell -- just check-spike
 ```
 
 产物和用法见 `workloads/am/README.md`。CI 配置已加入；本地验证不代表已运行

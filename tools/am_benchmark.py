@@ -18,6 +18,7 @@ from gem5rs import (
     Address,
     BareMetalPlatform,
     Board,
+    DifftestConfig,
     ExperimentConfig,
     FixedRam,
     Router,
@@ -25,6 +26,7 @@ from gem5rs import (
     RunResult,
     Rv64Core,
     SimpleUart,
+    SimulationError,
     StopReason,
     Tick,
     am_test_platform,
@@ -184,6 +186,7 @@ def run_guest(
     *,
     ram_latency: Tick = DEFAULT_RAM_LATENCY,
     trace: bool = False,
+    difftest: DifftestConfig | None = None,
 ) -> RunResult:
     board = Board()
     core = board.add(
@@ -192,6 +195,7 @@ def run_guest(
             stack_pointer=platform.stack_top,
             cycle=platform.cpu_period,
             stack_bytes=platform.stack_bytes,
+            difftest=difftest,
             experiment=ExperimentConfig(
                 platform.tick_femtoseconds, platform.instruction_budget
             )
@@ -251,6 +255,11 @@ def main() -> None:
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--display", action="store_true")
     parser.add_argument(
+        "--difftest",
+        action="store_true",
+        help="compare each retirement with the pinned Spike process",
+    )
+    parser.add_argument(
         "--output", type=Path, default=ROOT / "target/am-results/latest.json"
     )
     args = parser.parse_args()
@@ -266,8 +275,32 @@ def main() -> None:
     if args.build_only:
         print(build.elf)
         return
+    difftest = None
+    if args.difftest:
+        subprocess.run(["bash", str(ROOT / "tools/build-spike-adapter.sh")], check=True)
+        difftest = DifftestConfig(str(ROOT / "target/spike/adapter"))
     start = time.perf_counter()
-    result = run_guest(build.elf.read_bytes(), platform)
+    try:
+        result = run_guest(build.elf.read_bytes(), platform, difftest=difftest)
+    except SimulationError as error:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(
+                {
+                    "workload": workload,
+                    "elf_sha256": build.elf_sha256,
+                    "configuration": asdict(platform),
+                    "reference_configuration": None
+                    if difftest is None
+                    else asdict(difftest),
+                    "passed": False,
+                    "simulation_error": str(error),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        raise
     host_seconds = time.perf_counter() - start
     console = bytes(byte.value for byte in result.console).decode("ascii")
     if args.display:
@@ -286,7 +319,7 @@ def main() -> None:
         "ram_latency": 1000,
         "cpu": "blocking",
         "cache": None,
-        "difftest": False,
+        "difftest": None if result.difftest is None else asdict(result.difftest),
         "git_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),

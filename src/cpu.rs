@@ -22,6 +22,7 @@ pub struct Fault {
     pub reason: String,
     pub pc: u64,
     pub addr: Option<u64>,
+    architectural: Option<riscv::Fault>,
 }
 
 enum Phase {
@@ -39,9 +40,13 @@ pub struct Cpu {
     phase: Phase,
     next_id: u64,
     commits: Vec<Commit>,
+    committed: u64,
+    retain_trace: bool,
     fault: Option<Fault>,
     experiment: Option<crate::experiment::Experiment>,
     instruction_limit: bool,
+    observer: Option<Box<dyn crate::observation::Observer>>,
+    observation_error: Option<String>,
 }
 
 impl Cpu {
@@ -55,9 +60,13 @@ impl Cpu {
             phase: Phase::Start,
             next_id: 0,
             commits: Vec::new(),
+            committed: 0,
+            retain_trace: true,
             fault: None,
             experiment: None,
             instruction_limit: false,
+            observer: None,
+            observation_error: None,
         }
     }
 
@@ -78,12 +87,29 @@ impl Cpu {
         self.instruction_limit
     }
 
+    pub fn with_observer(mut self, observer: impl crate::observation::Observer + 'static) -> Self {
+        self.observer = Some(Box::new(observer));
+        self
+    }
+
+    pub fn observation_error(&self) -> Option<&str> {
+        self.observation_error.as_deref()
+    }
+
     pub fn registers(&self) -> &[u64; 32] {
         &self.registers
     }
 
     pub fn commits(&self) -> &[Commit] {
         &self.commits
+    }
+
+    pub fn with_trace(mut self, retain: bool) -> Self {
+        self.retain_trace = retain;
+        self
+    }
+    pub fn committed(&self) -> u64 {
+        self.committed
     }
 
     pub fn fault(&self) -> Option<&Fault> {
@@ -110,7 +136,7 @@ impl Cpu {
 
     fn execute(&mut self, at: u64, instruction: u32) -> Result<SourceAction, Fault> {
         if let Some(experiment) = &mut self.experiment {
-            if self.commits.len() as u64 >= experiment.budget() {
+            if self.committed >= experiment.budget() {
                 self.instruction_limit = true;
                 return Ok(SourceAction::Stop("instruction budget exhausted".into()));
             }
@@ -123,12 +149,13 @@ impl Cpu {
                             self.registers[crate::m5::ARG1],
                         ],
                         at,
-                        self.commits.len() as u64,
+                        self.committed,
                     )
                     .map_err(|reason| Fault {
                         reason,
                         pc: self.pc,
                         addr: None,
+                        architectural: None,
                     })?;
                 let exit = experiment.exit();
                 let commit = riscv::Commit {
@@ -137,7 +164,7 @@ impl Cpu {
                     next_pc: self.pc.wrapping_add(4),
                     register_write: Some((crate::m5::RESULT, value)),
                 };
-                self.retire(at, commit);
+                self.retire(at, commit, None, Some(op))?;
                 if let Some(exit) = exit {
                     self.phase = Phase::Stopped;
                     return Ok(SourceAction::Exit(exit.code));
@@ -148,7 +175,7 @@ impl Cpu {
         match riscv::execute(self.pc, instruction, &self.registers)
             .map_err(|fault| isa_fault(fault, None))?
         {
-            Step::Commit(commit) => self.commit(at, commit),
+            Step::Commit(commit) => self.commit(at, commit, None),
             Step::Memory(pending) => {
                 let (address, operation) = match pending.access() {
                     Access::Read { address, size } => (*address, Operation::Read { size: *size }),
@@ -162,24 +189,63 @@ impl Cpu {
         }
     }
 
-    fn commit(&mut self, at: u64, commit: riscv::Commit) -> Result<SourceAction, Fault> {
-        self.retire(at, commit);
+    fn commit(
+        &mut self,
+        at: u64,
+        commit: riscv::Commit,
+        memory: Option<crate::observation::MemoryEffect>,
+    ) -> Result<SourceAction, Fault> {
+        self.retire(at, commit, memory, None)?;
         self.fetch(at)
     }
 
-    fn retire(&mut self, at: u64, commit: riscv::Commit) {
-        commit.apply(&mut self.pc, &mut self.registers);
-        self.commits.push(Commit {
-            at,
+    fn retire(
+        &mut self,
+        at: u64,
+        commit: riscv::Commit,
+        memory: Option<crate::observation::MemoryEffect>,
+        service: Option<crate::m5::Operation>,
+    ) -> Result<(), Fault> {
+        self.committed = self.committed.checked_add(1).ok_or_else(|| Fault {
+            reason: "commit count overflow".into(),
             pc: commit.pc,
-            instruction: commit.instruction,
-            writeback: commit
-                .register_write
-                .map(|(register, value)| RegisterWrite {
-                    register: register as u64,
-                    value,
-                }),
-        });
+            addr: None,
+            architectural: None,
+        })?;
+        commit.apply(&mut self.pc, &mut self.registers);
+        if self.retain_trace {
+            self.commits.push(Commit {
+                at,
+                pc: commit.pc,
+                instruction: commit.instruction,
+                writeback: commit
+                    .register_write
+                    .map(|(register, value)| RegisterWrite {
+                        register: register as u64,
+                        value,
+                    }),
+            });
+        }
+        if let Some(observer) = &mut self.observer {
+            let retirement = crate::observation::Retirement {
+                pc: commit.pc,
+                instruction: commit.instruction,
+                next_pc: self.pc,
+                registers: self.registers,
+                memory,
+                service,
+            };
+            if let Err(error) = observer.retired(&retirement) {
+                self.observation_error = Some(error.clone());
+                return Err(Fault {
+                    reason: error,
+                    pc: commit.pc,
+                    addr: None,
+                    architectural: None,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -205,11 +271,32 @@ impl Source for Cpu {
                     })
             }
             (Phase::Data(id, pending), SourceEvent::Response(response)) if id == response.id => {
+                let memory = if self.observer.is_some() {
+                    match (pending.access(), &response.result) {
+                        (Access::Read { address, .. }, ResponseResult::ReadData(data)) => {
+                            Some(crate::observation::MemoryEffect {
+                                address: *address,
+                                write: false,
+                                data: data.clone(),
+                            })
+                        }
+                        (Access::Write { address, data }, ResponseResult::WriteAck) => {
+                            Some(crate::observation::MemoryEffect {
+                                address: *address,
+                                write: true,
+                                data: data.clone(),
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let (response, target_fault) = isa_response(&response.result);
                 pending
                     .complete(response)
                     .map_err(|fault| isa_fault(fault, target_fault))
-                    .and_then(|commit| self.commit(at, commit))
+                    .and_then(|commit| self.commit(at, commit, memory))
             }
             (phase, _) => {
                 self.phase = phase;
@@ -219,6 +306,12 @@ impl Source for Cpu {
         vec![match action {
             Ok(action) => action,
             Err(fault) => {
+                if let (Some(observer), Some(architectural)) =
+                    (&mut self.observer, &fault.architectural)
+                    && let Err(error) = observer.faulted(architectural)
+                {
+                    self.observation_error = Some(error);
+                }
                 let reason = fault.reason.clone();
                 self.fault = Some(fault);
                 SourceAction::Stop(reason)
@@ -244,6 +337,7 @@ fn isa_fault(fault: riscv::Fault, target: Option<crate::memory::Fault>) -> Fault
         reason,
         pc: fault.pc,
         addr: fault.address,
+        architectural: Some(fault),
     }
 }
 
@@ -449,14 +543,12 @@ mod tests {
                 }
             );
             assert_eq!(result.transactions.len(), transactions);
+            let fault = cpu.fault().unwrap();
             assert_eq!(
-                cpu.fault(),
-                Some(&Fault {
-                    pc: entry,
-                    addr: Some(addr),
-                    reason: reason.into()
-                })
+                (fault.pc, fault.addr, fault.reason.as_str()),
+                (entry, Some(addr), reason)
             );
+            assert!(fault.architectural.is_some());
             assert_eq!(cpu.pc(), entry);
             assert!(cpu.commits().is_empty());
         }

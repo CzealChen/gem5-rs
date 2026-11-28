@@ -9,16 +9,17 @@ devenv shell -- just check-am
 This builds a release wheel, installs it into an isolated directory using the
 existing devenv/uv environment, runs strict type checks, compiles guests through
 Make, tests the platform, and writes `target/am-results/acceptance.json`.
-`just check-mvp` retains the fast baseline; `just check-spike-probe` checks real
-Spike API capabilities. CI runs all three. AM itself does **not** yet use Spike
-difftest; reports explicitly record `difftest: false`.
+`just check-mvp` retains the fast baseline; `just check-spike` checks the real
+reference protocol, error injection and process failures. CI runs all three.
+AM acceptance compares hello and all four test algorithms with Spike, checks
+difftest on/off invariance, and records protocol/source identity and sync counts.
 
 For interactive runs inside `devenv shell`:
 
 ```sh
 maturin develop --release
 python -m tools.am_benchmark --workload hello --display
-python -m tools.am_benchmark --workload microbench --display --output target/am-results/test.json
+python -m tools.am_benchmark --workload microbench --difftest --display --output target/am-results/test.json
 python -m tools.am_benchmark --workload microbench --build-only
 ```
 
@@ -79,9 +80,29 @@ interval can print zero microseconds. Host seconds are reported separately.
 ## Current limits
 
 This delivers the four algorithm self-checks on the existing blocking CPU, as
-requested before P2. It does not complete the original plan's A3 Spike difftest,
-A5 pipeline/cache combinations or full suite/train acceptance. ROI currently reports
+requested before P2, with A3 streaming Spike comparison. A5 pipeline/cache
+combinations and full suite/train acceptance remain outside this entry. ROI currently reports
 ticks and commits; transaction counters are end-to-end, not ROI snapshots.
-`trace=False` omits large public trace results but the current Machine still retains
-internal transaction records until the run ends. Streaming observation and bounded
-memory remain follow-up work; this entry is intentionally restricted to test inputs.
+`trace=False` disables CPU commit storage and large public trace results. The
+difftest driver consumes each retirement immediately and keeps only 16 diagnostic
+instruction identities. The current Machine still retains internal transaction
+records until the run ends, so whole-simulator bounded memory remains follow-up
+work; this entry is intentionally restricted to test inputs.
+
+## Differential execution
+
+`--difftest` builds the pinned independent Spike adapter and attaches the Rust
+observer to the same blocking CPU. Every ordinary instruction compares PC, word,
+next PC, all GPRs and memory effects. Completed m5/console/Exit operations synchronize
+all GPRs and PC; the reference never executes those platform operations.
+
+The option does not change guest build inputs, timing, console bytes, ROI or
+end-to-end simulated statistics. Native errors stop at the first difference and
+are saved in the requested JSON report. Reference timeouts/crashes and guest
+faults never count as a passing run. The expected exit is success/code zero; the
+public `DifftestConfig` also supports explicit failure/code expectations.
+
+Python assembly can pass `DifftestConfig(adapter=...)` to `Rv64Core.difftest`.
+`RunResult.difftest` is optional typed statistics; without an observer no reference
+process or per-instruction communication is used. Protocol and supported-state
+boundaries are documented in [the adapter README](../../tools/spike/README.md).

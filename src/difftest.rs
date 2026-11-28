@@ -511,3 +511,26 @@ fn parse_state(reply: &str) -> Result<Retirement, String> {
         service: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_parser_rejects_partial_extra_and_invalid_state() {
+        let valid = format!("state 4096 19 4100{} 0", " 0".repeat(32));
+        assert_eq!(parse_state(&valid).unwrap().next_pc, 4100);
+        for invalid in [
+            "state 4096".to_string(),
+            valid.replace(" 19 ", " 4294967296 "),
+            format!("{valid} extra"),
+            format!("state 4096 19 4100 1{} 0", " 0".repeat(31)),
+            format!("state 4096 19 4100{} 1 read 8192 3 0", " 0".repeat(32)),
+        ] {
+            assert!(parse_state(&invalid).is_err(), "{invalid}");
+        }
+        let sources: serde_json::Value =
+            serde_json::from_str(include_str!("../workloads/am/sources.json")).unwrap();
+        assert_eq!(sources["spike"]["commit"].as_str(), Some(SPIKE_COMMIT));
+    }
+}

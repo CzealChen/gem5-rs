@@ -6,6 +6,7 @@ trap 'rm -rf -- "$work"' EXIT
 work=$(cd "$work" && pwd -P)
 unset PYTHONPATH PYTHONHOME PYTHONOPTIMIZE MYPYPATH
 cd "$root"
+bash tools/build-spike-adapter.sh
 py="${VIRTUAL_ENV:?Run inside devenv shell}/bin/python"
 maturin build --release --locked --interpreter "$py" --out "$work/dist"
 wheels=("$work"/dist/*.whl)
@@ -18,4 +19,4 @@ mypy --strict --python-executable "$py" -p gem5rs
 mypy --strict --python-executable "$py" am_benchmark.py am.py
 export GEM5RS_REPO_ROOT="$root"
 "$py" -E -s am.py
-"$py" -E -s am_benchmark.py --output "$root/target/am-results/acceptance.json"
+"$py" -E -s am_benchmark.py --difftest --output "$root/target/am-results/acceptance.json"
