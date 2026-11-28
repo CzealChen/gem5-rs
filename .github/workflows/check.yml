@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
       - name: Baselines, installed AM package and real Spike probe
-        run: nix run github:cachix/devenv/v2.2.2 -- shell -- just check-mvp check-am check-spike-probe
+        run: nix run github:cachix/devenv/v2.2.2 -- shell -- just check-mvp check-am check-spike
       - uses: actions/upload-artifact@v4
         if: always()
         with:

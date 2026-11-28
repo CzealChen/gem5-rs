@@ -1,45 +1,75 @@
-# Spike A0 能力探针
+# Spike reference adapter and Rust streaming driver
 
-运行：`devenv shell -- just check-spike-probe`。
+Run `devenv shell -- just check-spike` to build the independent reference process
+and execute protocol, synchronization, failure and error-injection tests.
+`devenv shell -- just check-am` additionally compares both AM guests using the
+installed wheel. Default Cargo builds do not link or launch Spike/C++.
 
-这是 AM 计划 A0 的接口可行性验证，不是 A3 的生产参考进程，不接受 workload
-或任意 skip 请求。默认 Rust 构建无需 Spike/C++；具名检查入口才编译独立 C++
-进程并从 Rust 对比它的输出。A3 完成后应将这里的测试迁入正式 adapter，删除
-原型入口，避免维护两套协议。
+The A0 probe has been removed. `adapter.cc` is the only reference implementation;
+`src/difftest.rs` owns the client, comparison policy, deadline and diagnostics.
+CPU models only expose read-only architectural observations through
+`src/observation.rs`; they do not know the reference protocol or MMIO addresses.
 
-## 固定来源
+## Fixed dependency
 
-- Spike：`riscv-software-src/riscv-isa-sim@d140cbc0ae4ef4fc64ad323f3f175ff15f6dca56`。
-- Nix 源码 NAR：`sha256-chyTl7v7pZUGcRczzrawLOYxSYbbk7eWohcbduU7VBU=`。
-- 工具来自 `devenv.lock` 锁定的 nixpkgs；版本为
-  `1.1.0-unstable-2026-10-20`。使用 recipe 默认 configure 参数；Darwin 的
-  SoftFloat 编译诊断补丁见 `devenv.nix`，不改变指令语义。
-- 探针编译：C++20，`-Wall -Wextra -Werror`，链接该环境的 `libriscv`。
-  不从系统 PATH 混入另一套头文件或库。更新 lock 时必须重新核验版本和此探针。
+Spike is `riscv-software-src/riscv-isa-sim@d140cbc0ae4ef4fc64ad323f3f175ff15f6dca56`,
+source NAR `sha256-chyTl7v7pZUGcRczzrawLOYxSYbbk7eWohcbduU7VBU=`, provided by
+`devenv.lock` as `1.1.0-unstable-2026-10-20`. The build script requires that locked
+Nix package name and uses its headers, library and runtime rpath together. The
+Darwin SoftFloat warning patch is documented in `devenv.nix`. Changing this
+source requires updating and revalidating the protocol handshake identity.
 
-## 已由真实库验证的接口
+## Protocol version 1
 
-`processor_t("RV64I", "M", ...)` 配合最小 `simif_t` RAM 实现；直接设置
-`get_state()->pc` 和 `XPR.write()` 后调用 `step(1)`，没有执行 reset ROM。
-RAM 先清零，指令按小端写入，所有 GPR 明确初始化，x0 保持零。
+One ASCII command and one response per newline, at most 16 KiB per message.
+Numbers are unsigned decimal unless stated otherwise. `GPR` means exactly 32
+u64 values in x0..x31 order. Errors return `error <reason>` and exit nonzero.
+Unexpected EOF, malformed messages and timeouts are reference infrastructure
+failures, distinct from DUT faults or a guest failure exit.
 
-测试覆盖 addi、sd、ld、add；Rust 用现有 ISA 语义逐步比较 next PC 和全部
-32 个 GPR，第二次创建进程验证可重复性。中间替换全部 GPR/PC 后继续独立执行。
-`enable_log_commits()` 开启实际的 `log_mem_read/write`：检查地址、宽度和 store
-值；load 日志的 value 不被假设为返回数据，实际加载结果从架构 GPR 获取。
+| Request | Response | Meaning |
+| --- | --- | --- |
+| `hello` | `hello 1 <commit> rv64i pc_gpr_mem` | Exact version, source and state scope |
+| `init rv64i <base> <size> <pc> GPR` | `ok` | Page-aligned RAM, up to 256 MiB, initially zero; explicit PC/GPR |
+| `load <address> <hex bytes>` | `ok` | Up to 4096 bytes; only before stepping/synchronizing |
+| `inspect` | `instruction <pc> <word>` | Check skipped instruction without executing it |
+| `step` | `state <pc> <word> <next_pc> GPR <count> [<read/write> <address> <width> <value>]` | One independent Spike step, zero or one ordinary memory effect |
+| `step` (trap) | `fault <pc> <word> <mcause> <mepc> <mtval>` | No retirement; faulting instruction is zero if fetch was unmapped |
+| `sync <pc> GPR` | `ok` | Replace all architectural GPR/PC; reject nonzero x0 and unaligned PC; RAM unchanged |
+| `quit` | `bye`, then exit 0 | Orderly shutdown; nonzero exit after bye still fails |
 
-`EBREAK` 的 `mcause=3` 与 `mepc` 可读取。此结果只证明故障信息可获取，尚未
-证明生产协议能可靠区分所有故障：A3 必须识别当次 trap（包括连续相同原因），
-禁止只比较 mcause 新旧值。该探针的日志写到 stderr，stdout 仅供测试读取。
+The Rust loader's validated ELF segments initialize the reference and DUT with
+the same bytes. Both RAMs start zeroed, including BSS, and both start directly
+at the ELF entry with the same registers. Spike's reset ROM is not executed.
+`minstret` distinguishes the current step's trap, so consecutive identical trap
+causes remain observable. Load bytes are read from reference RAM; store effects
+come from Spike's commit log. No DUT RAM data is copied during synchronization.
 
-## 下一阶段协议约束（尚未实现）
+## Comparison and failure rules
 
-生产协议使用版本化具名消息，显式握手版本、Spike commit、ISA 和状态范围。
-初始化传入经过校验的 RAM 布局、ELF 段及 BSS、入口和全部 GPR；参考端不得
-隐式执行启动 ROM。单步返回执行 PC/指令、post PC/GPR、访存效果或 fault。
-同步只替换 PC/GPR，验证 x0 和 PC 对齐，不修改 RAM。结束必须回收子进程。
+Each ordinary retirement compares execution PC/word, next PC, all GPRs and the
+load/store address, width and bytes. Mismatches poison the driver immediately;
+a subsequent synchronization cannot overwrite or clear the first difference.
+Diagnostics retain only 16 recent instruction identities, not full trace snapshots.
+Architectural faults compare PC, cause and any relevant fault address. A matched
+trap still fails benchmark acceptance; it is not converted into a successful exit.
 
-驱动在发送 step 前决定已成功提交的平台操作是否属于白名单；不得在 Spike
-执行失败后再同步补救。通信应有消息大小与时间上限，未知版本、ISA、无效状态、
-提前 EOF、超时、崩溃均单独报错。本探针固定输入，不具备上述生产防护，也不
-构成 AM ELF、m5 ABI、周期、缓存或四种 CPU 组合通过的证据。
+Only successfully completed enabled m5 operations, console byte stores and legacy
+Exit stores can synchronize. Addresses/widths come from the validated board.
+Before skipping, the reference instruction is inspected. MMIO stores are also
+re-decoded against the preceding compared register state: an erroneous RAM store
+address cannot be disguised as a console operation. There are no PC/name-based
+skip regions and no resynchronization after a comparison error.
+
+The current driver supports one core, one contiguous RAM and no additional RAM
+writers, RV64I PC/GPR/ordinary memory only. It rejects other topologies. Expected
+exit code and failure/success kind are explicit configuration and checked before
+reporting passed. CSR/trap-handler execution, FP, vectors and multicore are outside
+this protocol's scope. A timeout covers request write plus response read; every
+exit/error path kills or reaps the child and joins its I/O worker.
+
+The driver is streaming; CPU commit logging is optional. The existing memory
+engine still retains its transaction history through a run, independently of
+reference communication. This does not claim the whole simulator has bounded
+memory for arbitrarily long workloads. Spike validates architecture, not timing
+or the skipped services; their independent platform tests remain required.
