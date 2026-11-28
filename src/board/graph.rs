@@ -40,6 +40,8 @@ enum Model {
         stack_bytes: u64,
         #[serde(default)]
         difftest: Option<crate::difftest::Config>,
+        #[serde(default)]
+        machine_mode: bool,
     },
     FixedRam {
         size_bytes: u64,
@@ -124,6 +126,7 @@ pub(super) enum Source {
         cycle: u64,
         experiment: Option<crate::experiment::Config>,
         difftest: Option<crate::difftest::Config>,
+        machine_mode: bool,
     },
 }
 
@@ -365,7 +368,14 @@ impl Graph {
                         experiment,
                         stack_bytes,
                         difftest,
+                        machine_mode,
                     } => {
+                        if *machine_mode && difftest.is_some() {
+                            return Err(ConfigError::from(
+                                "machine_mode is not supported by the current difftest protocol"
+                                    .to_owned(),
+                            ));
+                        }
                         if std::mem::replace(&mut has_core, true) {
                             return Err(ConfigError::from(format!(
                                 "{label}: a board uses one RV64 core"
@@ -382,6 +392,7 @@ impl Graph {
                                 .with_context(|_| ContextSnafu {
                                     location: label.clone(),
                                 })?,
+                            machine_mode: *machine_mode,
                             stack_pointer: *stack_pointer,
                             cycle: *cycle,
                             experiment: experiment

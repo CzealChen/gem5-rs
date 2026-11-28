@@ -77,6 +77,7 @@ class Rv64Core:
     experiment: ExperimentConfig | None = None
     stack_bytes: int = 16
     difftest: DifftestConfig | None = None
+    machine_mode: bool = False
 
 
 @dataclass(frozen=True, slots=True)

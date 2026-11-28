@@ -78,9 +78,12 @@ def _node(model: _Model) -> dict[str, object]:
                 "size_bytes": size_bytes,
                 "latency": latency,
             }
-        case Rv64Core(elf, stack_pointer, cycle, experiment, stack_bytes, difftest):
+        case Rv64Core(
+            elf, stack_pointer, cycle, experiment, stack_bytes, difftest, machine_mode
+        ):
             return {
                 "kind": "rv64_core",
+                "machine_mode": machine_mode,
                 "elf": list(elf),
                 "stack_pointer": stack_pointer,
                 "cycle": cycle,

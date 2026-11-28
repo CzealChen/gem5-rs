@@ -1,4 +1,4 @@
-from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, SimpleUart, Tick, Traffic
+from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, Rv64Core, SimpleUart, Tick, Traffic
 
 
 def assemble() -> None:
@@ -12,3 +12,5 @@ def assemble() -> None:
     board.connect(router.inputs[0], banks.input)  # error: Argument 1 to "connect" of "Board" has incompatible type "TargetIn"; expected "RequestOut"
     console = board.add(SimpleUart(Address(4096), 4096, Tick(3)))
     board.connect(one.requests, console)  # error: Argument 2 to "connect" of "Board" has incompatible type "TargetHandle"; expected "TargetIn"
+
+    Rv64Core(elf=b"", stack_pointer=Address(64), machine_mode="yes")  # error: Argument "machine_mode" to "Rv64Core" has incompatible type "str"; expected "bool"

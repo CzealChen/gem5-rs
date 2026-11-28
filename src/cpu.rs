@@ -35,6 +35,7 @@ enum Phase {
 
 pub struct Cpu {
     pc: u64,
+    machine: Option<crate::machine::Machine>,
     registers: [u64; 32],
     cycle: u64,
     phase: Phase,
@@ -55,6 +56,7 @@ impl Cpu {
         registers[2] = stack_pointer;
         Self {
             pc: entry,
+            machine: None,
             registers,
             cycle,
             phase: Phase::Start,
@@ -68,6 +70,11 @@ impl Cpu {
             observer: None,
             observation_error: None,
         }
+    }
+
+    pub fn with_machine_mode(mut self, enabled: bool) -> Self {
+        self.machine = enabled.then(crate::machine::Machine::default);
+        self
     }
 
     pub fn pc(&self) -> u64 {
@@ -171,6 +178,11 @@ impl Cpu {
                 }
                 return self.fetch(at);
             }
+        }
+        if let Some(machine) = &mut self.machine
+            && let Some(result) = machine.execute(self.pc, instruction, &self.registers)
+        {
+            return self.commit(at, result.map_err(|fault| isa_fault(fault, None))?, None);
         }
         match riscv::execute(self.pc, instruction, &self.registers)
             .map_err(|fault| isa_fault(fault, None))?
@@ -306,6 +318,13 @@ impl Source for Cpu {
         vec![match action {
             Ok(action) => action,
             Err(fault) => {
+                if let (Some(machine), Some(architectural)) =
+                    (&mut self.machine, &fault.architectural)
+                    && let Some(vector) = machine.enter(architectural)
+                {
+                    self.pc = vector;
+                    return vec![self.fetch(at).expect("aligned direct trap vector")];
+                }
                 if let (Some(observer), Some(architectural)) =
                     (&mut self.observer, &fault.architectural)
                     && let Err(error) = observer.faulted(architectural)

@@ -5,6 +5,7 @@ pub mod difftest;
 pub mod elf;
 pub mod experiment;
 pub mod m5;
+pub mod machine;
 pub mod memory;
 pub mod observation;
 pub mod riscv;

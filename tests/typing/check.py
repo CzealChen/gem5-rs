@@ -15,6 +15,7 @@ def _mypy(
         [
             executable,
             "--strict",
+            "--no-incremental",  # Fixtures are rewritten in place between checks.
             "--python-executable",
             interpreter,
             "--no-error-summary",
@@ -77,6 +78,7 @@ def main() -> None:
         corrected = corrected.replace(
             "one.requests, console)", "one.requests, console.input)"
         )
+        corrected = corrected.replace('machine_mode="yes"', "machine_mode=True")
         case.write_text(corrected, encoding="utf-8")
         _check_clean(_mypy(mypy, interpreter, case))
 

@@ -47,7 +47,7 @@ def console_assembly() -> None:
 def assemble(elf: bytes) -> None:
     board = Board()
     traffic = board.add(Traffic([Read(Tick(0), Address(0), 1)]))
-    core = board.add(Rv64Core(elf=elf, stack_pointer=Address(64)))
+    core = board.add(Rv64Core(elf=elf, stack_pointer=Address(64), machine_mode=True))
     ram = board.add(DualBankRam(64, Tick(10), 8))
     exit_port = board.add(Exit(Address(64)))
     router = board.add(

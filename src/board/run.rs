@@ -79,9 +79,12 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
             stack_pointer,
             cycle,
             experiment,
+            machine_mode,
             ..
         } => {
-            let cpu = Cpu::new(image.entry, *stack_pointer, *cycle).with_trace(trace);
+            let cpu = Cpu::new(image.entry, *stack_pointer, *cycle)
+                .with_trace(trace)
+                .with_machine_mode(*machine_mode);
             Some(match experiment {
                 Some(config) => cpu.with_experiment(
                     crate::experiment::Experiment::new(*config).expect("validated config"),
