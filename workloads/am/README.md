@@ -11,7 +11,7 @@ existing devenv/uv environment, runs strict type checks, compiles guests through
 Make, tests the platform, and writes `target/am-results/acceptance.json`.
 `just check-mvp` retains the fast baseline; `just check-spike` checks the real
 reference protocol, error injection and process failures. CI runs all three.
-AM acceptance compares hello and all four test algorithms with Spike, checks
+AM acceptance compares hello and all ten test algorithms with Spike, checks
 difftest on/off invariance, and records protocol/source identity and sync counts.
 
 For interactive runs inside `devenv shell`:
@@ -56,7 +56,8 @@ layout changes generate a different artifact. Reports are saved separately.
 
 The explicit profile has 16 MiB RAM at `0x80000000`, a 64 KiB reserved stack,
 console at `0x10000000`, 1 ps ticks and a 1 ns CPU period. RAM and PIO latency
-are each 1000 ticks. The profile's event/tick/instruction budgets are enforced.
+are each 1000 ticks. The profile enforces 12 million events, 2 million instructions and 10 billion
+ticks. The ELF must leave at least 128 KiB heap for the largest test requirement.
 This is a separate workload from the original 4 KiB Exit-MMIO examples.
 
 The console accepts only byte writes at offset zero, cannot be fetched/read,
@@ -64,8 +65,9 @@ never caches data, and does not interpret EOT as exit. A byte is recorded when
 the device accepts a write; its acknowledgement arrives after the PIO delay.
 Host display happens after simulation and cannot change the guest's behavior.
 
-`mainargs` is explicitly `test`. The declared order is queen, qsort, sieve, md5;
-this is a selected-subset runner, not the complete upstream suite order. Each
+`mainargs` is explicitly `test`. The complete upstream order is qsort, queen,
+bf, fib, sieve, 15pz, dinic, lzip, ssort, md5. The runner uses the upstream
+`BENCHMARK_LIST` directly, including the three C++ items and QuickLZ. Each
 item retains prepare/run/validate and the upstream test checksum. Memory shortage
 reports a skipped item and fails the run; missing/duplicate/non-passing result
 records or missing ROI records also fail host acceptance.
@@ -79,9 +81,9 @@ interval can print zero microseconds. Host seconds are reported separately.
 
 ## Current limits
 
-This delivers the four algorithm self-checks on the existing blocking CPU, as
+This delivers all ten algorithm self-checks on the existing blocking CPU, as
 requested before P2, with A3 streaming Spike comparison. A5 pipeline/cache
-combinations and full suite/train acceptance remain outside this entry. ROI currently reports
+combinations and train/ref/huge acceptance remain outside this entry. ROI currently reports
 ticks and commits; transaction counters are end-to-end, not ROI snapshots.
 `trace=False` disables CPU commit storage and large public trace results. The
 difftest driver consumes each retirement immediately and keeps only 16 diagnostic

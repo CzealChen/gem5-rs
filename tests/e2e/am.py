@@ -58,8 +58,8 @@ def main() -> None:
         stats.compared + stats.synced_m5 + stats.synced_console + stats.synced_exit
         == result.stats.committed
     )
-    assert stats.synced_m5 == 9 and stats.synced_console == len(result.console)
-    assert len(items) == 4 and all(region.committed > 0 for region in result.regions)
+    assert stats.synced_m5 == 21 and stats.synced_console == len(result.console)
+    assert len(items) == 10 and all(region.committed > 0 for region in result.regions)
     assert result.stats.committed > sum(region.committed for region in result.regions)
     # Runtime timing changes must reuse the same ELF and preserve all self-checks.
     slower = run_guest(benchmark.elf.read_bytes(), platform, ram_latency=Tick(2000))
@@ -84,7 +84,7 @@ def main() -> None:
     else:
         raise AssertionError("zero exit without per-item validation must fail")
     print(
-        f"AM test: four self-checks passed, commits={result.stats.committed}, tick={result.final_tick}"
+        f"AM test: ten self-checks passed, commits={result.stats.committed}, tick={result.final_tick}"
     )
 
 

@@ -35,7 +35,7 @@ from gem5rs import (
 ROOT = Path(
     os.environ.get("GEM5RS_REPO_ROOT", str(Path(__file__).resolve().parents[1]))
 )
-EXPECTED = ("queen", "qsort", "sieve", "md5")
+EXPECTED = ("qsort", "queen", "bf", "fib", "sieve", "15pz", "dinic", "lzip", "ssort", "md5")
 DEFAULT_RAM_LATENCY = Tick(1000)
 type Workload = Literal["hello", "microbench"]
 
@@ -94,11 +94,7 @@ def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
         upstream = ROOT / "third_party/am-kernels/microbench"
         shutil.copytree(upstream / "include", work / "include")
         shutil.copyfile(upstream / "src/bench.c", work / "upstream_bench.c")
-        (work / "algorithms").mkdir()
-        for name in EXPECTED:
-            shutil.copyfile(
-                upstream / f"src/{name}/{name}.c", work / f"algorithms/{name}.c"
-            )
+        shutil.copytree(upstream / "src", work / "src")
         for name in ("runner.c", "hello.c"):
             shutil.copyfile(ROOT / "workloads/am" / name, work / name)
         script = work / "platform.ld"
@@ -143,7 +139,7 @@ def build_guest(platform: BareMetalPlatform, workload: Workload) -> GuestBuild:
                 "_console",
             ):
                 addresses[fields[2]] = int(fields[0], 16)
-        platform.heap_bounds(Address(addresses["_heap_start"]), 1024)
+        platform.heap_bounds(Address(addresses["_heap_start"]), 128 * 1024)
         if (addresses["_heap_end"], addresses["_stack_top"], addresses["_console"]) != (
             platform.stack_bottom,
             platform.stack_top,
@@ -237,11 +233,8 @@ def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
             raise ValueError(f"unexpected benchmark output: {line!r}")
         actual.append({"name": fields[1], "status": fields[2]})
     expected = [{"name": name, "status": "passed"} for name in EXPECTED]
-    if actual != expected or tuple(region.id for region in result.regions) != (
-        1,
-        2,
-        3,
-        4,
+    if actual != expected or tuple(region.id for region in result.regions) != tuple(
+        range(1, len(EXPECTED) + 1)
     ):
         raise ValueError(f"benchmark execution/validation mismatch: {actual!r}")
     return actual
@@ -309,9 +302,7 @@ def main() -> None:
         "workload": workload,
         "mainargs": "test",
         "expected_items": ["hello"] if workload == "hello" else list(EXPECTED),
-        "excluded_by_configuration": []
-        if workload == "hello"
-        else ["bf", "fib", "15pz", "dinic", "lzip", "ssort"],
+        "excluded_by_configuration": [],
         "build_key": build.key,
         "elf_sha256": build.elf_sha256,
         "compiler": build.compiler,

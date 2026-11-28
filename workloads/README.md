@@ -29,5 +29,5 @@ Spike 运行其 reset ROM（ROM 使用 Zicsr），启动代码随后初始化 RO
 ## AM MicroBench
 
 AM 使用独立的 16 MiB 平台、上游 Makefile、console 与显式 m5 指令扩展。
-`devenv shell -- just check-am` 验证四个 test 算法；详见 [AM 入口](am/README.md)。
+`devenv shell -- just check-am` 验证完整 10 项 test 算法；详见 [AM 入口](am/README.md)。
 此入口不使用本页的离线 Spike CLI，也不改变原有 4 KiB 裸机基线。

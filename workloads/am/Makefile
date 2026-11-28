@@ -2,7 +2,7 @@
 # Python prepares the source overlay and authoritative platform.ld only.
 NAME := $(WORKLOAD)
 ARCH := riscv64-gem5rs
-SRCS := runner.c $(addprefix algorithms/,$(addsuffix .c,queen qsort sieve md5))
+SRCS := runner.c $(filter-out src/bench.c,$(shell find src/ -name "*.c" -o -name "*.cc"))
 ifeq ($(WORKLOAD),hello)
 SRCS := hello.c
 endif

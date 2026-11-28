@@ -132,7 +132,7 @@ def am_test_platform() -> BareMetalPlatform:
         cpu_period=Tick(1000),
         pio_latency=Tick(1000),
         tick_budget=Tick(10_000_000_000),
-        event_budget=5_000_000,
-        instruction_budget=1_000_000,
+        event_budget=12_000_000,
+        instruction_budget=2_000_000,
         m5_enabled=True,
     )
