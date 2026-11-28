@@ -2,6 +2,7 @@
 
 from ._board import Board, Machine
 from ._native import ConfigurationError, SimulationError
+from ._platform import BareMetalPlatform, am_test_platform
 from ._types import (
     AccessKind,
     Address,
@@ -34,6 +35,7 @@ __all__ = [
     "AccessKind",
     "Address",
     "AddressRange",
+    "BareMetalPlatform",
     "Board",
     "Commit",
     "ConfigurationError",
@@ -60,4 +62,5 @@ __all__ = [
     "Traffic",
     "Transaction",
     "Write",
+    "am_test_platform",
 ]

@@ -30,10 +30,11 @@ cp -- "$root"/tests/typing/{check.py,valid.py,connections.py.case} .
 cp -- "$root"/tests/e2e/*.py "$root/tools/spike_trace.py" .
 printf '[mypy]\n' > mypy.ini
 mypy --strict --python-executable "$py" -p gem5rs
-mypy --strict --python-executable "$py" check.py installed.py traffic.py bare_metal.py spike_trace.py
+mypy --strict --python-executable "$py" check.py installed.py traffic.py bare_metal.py platform_config.py spike_trace.py
 "$py" -E -s installed.py
 "$py" -E -s check.py --python-executable "$py"
 "$py" -E -s traffic.py
+"$py" -E -s platform_config.py
 
 bash "$root/workloads/build.sh" "$work/elf"
 (cd "$root" && GEM5RS_ELF_DIR="$work/elf" "$py" -E -s -m unittest workloads.test_spike_trace)

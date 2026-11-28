@@ -1,0 +1,19 @@
+{
+  "gem5": {
+    "repository": "https://github.com/gem5/gem5",
+    "commit": "9d368896ce119c17e1289dcbb18f33624724b843"
+  },
+  "abstract-machine": {
+    "repository": "https://github.com/NJU-ProjectN/abstract-machine",
+    "commit": "068dc8cc150c63388fc5f457ff7b7dd70c5dd0f5"
+  },
+  "am-kernels": {
+    "repository": "https://github.com/NJU-ProjectN/am-kernels",
+    "commit": "9c433f7cf4b4e05d09543bf7e269b23502d1b2b6"
+  },
+  "spike": {
+    "repository": "https://github.com/riscv-software-src/riscv-isa-sim",
+    "commit": "d140cbc0ae4ef4fc64ad323f3f175ff15f6dca56",
+    "nix_source_nar_hash": "sha256-chyTl7v7pZUGcRczzrawLOYxSYbbk7eWohcbduU7VBU="
+  }
+}
