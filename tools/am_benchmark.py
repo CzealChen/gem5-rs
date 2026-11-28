@@ -378,6 +378,8 @@ def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
         return [{"name": "hello", "status": "passed"}]
     actual: list[dict[str, str]] = []
     for line in output.splitlines():
+        if not line.startswith("AM_RESULT"):
+            continue
         fields = line.split()
         if len(fields) != 3 or fields[0] != "AM_RESULT":
             raise ValueError(f"unexpected benchmark output: {line!r}")

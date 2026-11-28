@@ -89,7 +89,13 @@ bf, fib, sieve, 15pz, dinic, lzip, ssort, md5. The runner uses the upstream
 `BENCHMARK_LIST` directly, including the three C++ items and QuickLZ. Each
 item retains prepare/run/validate and the upstream test checksum. Memory shortage
 reports a skipped item and fails the run; missing/duplicate/non-passing result
-records or missing ROI records also fail host acceptance.
+records or missing ROI records also fail host acceptance. Human-readable upstream
+output is retained alongside `AM_RESULT`: all inputs print scored and total time;
+non-test inputs print per-item minimum time and score; ref/huge also print overall
+Marks and the upstream reference CPU. The pinned upstream REPEAT is one.
+Scored time surrounds run (including ROI marker overhead), while total time also
+includes preparation, validation and loop console output. Both use simulated uptime,
+not host wall time; Marks describe this model, not real hardware performance.
 
 ROI contains only run plus the ordinary wrapper instructions between the markers.
 The begin/end markers themselves are excluded from committed counts. Tick boundaries

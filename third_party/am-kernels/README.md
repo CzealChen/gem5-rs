@@ -51,6 +51,8 @@ python -m tools.am_benchmark --input test --display
 ```
 
 默认运行 MicroBench，difftest 默认关闭，加 `--difftest` 开启。
+`--display` 保留上游耗时输出，`ref/huge` 还显示 Marks；耗时来自仿真，
+分数用于描述当前模型，不能直接当作真实硬件性能。
 输入规模、内存和预算参数详见 [MicroBench 说明](benchmarks/microbench/README.md)。
 `just check-am` 执行当前 AM 验收流程，包括 Spike difftest。
 该入口中的 `--workload hello` 是项目自有的

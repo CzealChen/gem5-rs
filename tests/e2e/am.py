@@ -116,7 +116,7 @@ def main() -> None:
         stats.compared + stats.synced_m5 + stats.synced_console + stats.synced_exit
         == result.stats.committed
     )
-    assert stats.synced_m5 == 21 and stats.synced_console == len(result.console)
+    assert stats.synced_m5 == 43 and stats.synced_console == len(result.console)
     assert len(items) == 10 and all(region.committed > 0 for region in result.regions)
     assert result.stats.committed > sum(region.committed for region in result.regions)
     # Runtime timing changes must reuse the same ELF and preserve all self-checks.
@@ -126,9 +126,22 @@ def main() -> None:
         region.committed for region in slower.regions
     )
     assert result.console != slower.console  # Device timestamps reflect timing.
-    assert bytes(byte.value for byte in result.console) == bytes(
-        byte.value for byte in slower.console
-    )
+    output = bytes(byte.value for byte in result.console).decode("ascii")
+    slower_output = bytes(byte.value for byte in slower.console).decode("ascii")
+    assert "MicroBench PASS\n" in output
+    assert "Marks" not in output and "min time:" not in output
+
+    def time_us(console: str, label: str) -> int:
+        line = next(line for line in console.splitlines() if line.startswith(label))
+        value = line.removeprefix(label).strip().removesuffix(" ms")
+        milliseconds, microseconds = value.split(".")
+        assert len(microseconds) == 3
+        return int(milliseconds) * 1000 + int(microseconds)
+
+    scored = time_us(output, "Scored time:")
+    assert 0 < scored <= time_us(output, "Total  time:")
+    assert time_us(slower_output, "Scored time:") > scored
+    assert time_us(slower_output, "Total  time:") > time_us(output, "Total  time:")
     try:
         validate(replace(result, regions=result.regions[:-1]), "microbench")
     except ValueError:

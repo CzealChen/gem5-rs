@@ -24,7 +24,13 @@ python -m tools.am_benchmark --workload microbench --difftest --display --output
 这两个命令均通过 Makefile 编译 RV64I/LP64 guest，在当前 blocking CPU 上运行
 qsort、queen、bf、fib、sieve、15pz、dinic、lzip、ssort、md5，并检查每项的上游
 校验结果。默认使用 `test` 输入；内存不足、缺项或校验失败均视为失败。
-`--display` 显示 guest 输出，JSON 文件保存每项结果、ROI 和仿真统计。
+`--display` 在仿真结束后显示 guest 输出，JSON 文件保存每项结果、ROI 和仿真统计。
+保留上游的性能输出：所有输入打印 `Scored time`（各次 run 的累计耗时）和
+`Total time`（整个测试循环耗时，包含准备、校验和循环中的打印）；`train/ref/huge`
+额外打印各项 `min time`，`ref/huge` 额外打印 Marks 和上游参考 CPU。
+时间来自仿真 `uptime`，不是主机墙钟；Marks 使用上游公式和参考数据，代表当前
+blocking CPU 模型的结果，不能直接作为真实硬件性能。微秒取整可能使短项目耗时为零。
+结构化 `AM_RESULT` 校验行和 ROI 统计仍然保留。
 
 输入规模通过 `--input test|train|ref|huge` 选择，例如：
 
