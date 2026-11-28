@@ -13,3 +13,5 @@ pub mod sim;
 
 #[cfg(feature = "python")]
 mod native;
+
+pub mod timer;

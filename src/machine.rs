@@ -1,4 +1,4 @@
-//! Opt-in M-only synchronous trap execution (RV64I + Zicsr, no interrupts).
+//! Opt-in M-only trap execution (RV64I + Zicsr, optional machine timer).
 //! Semantics: RISC-V privileged specification, Machine-Level ISA, sections
 //! Machine Status/Trap Setup/Trap Handling and Trap-Return Instructions.
 //! https://docs.riscv.org/reference/isa/priv/machine.html
@@ -11,6 +11,8 @@ const MPP: u64 = 3 << 11;
 #[derive(Debug)]
 pub struct Machine {
     mstatus: u64,
+    mie: u64,
+    timer_pending: bool,
     mtvec: u64,
     mscratch: u64,
     mepc: u64,
@@ -22,6 +24,8 @@ impl Default for Machine {
     fn default() -> Self {
         Self {
             mstatus: MPP,
+            mie: 0,
+            timer_pending: false,
             mtvec: 0,
             mscratch: 0,
             mepc: 0,
@@ -36,6 +40,8 @@ impl Machine {
         Some(match csr {
             0x300 => self.mstatus,
             0x301 => (2 << 62) | (1 << 8), // RV64I; only M privilege exists.
+            0x304 => self.mie,
+            0x344 => u64::from(self.timer_pending) << 7,
             0x305 => self.mtvec,
             0x340 => self.mscratch,
             0x341 => self.mepc,
@@ -49,7 +55,9 @@ impl Machine {
     fn write(&mut self, csr: u32, value: u64) -> bool {
         match csr {
             0x300 => self.mstatus = (value & (MIE | MPIE)) | MPP,
-            0x301 => {}                       // WARL fixed ISA
+            0x301 => {} // WARL fixed ISA
+            0x304 => self.mie = value & (1 << 7),
+            0x344 => {}                       // MTIP is a read-only hardware level.
             0x305 => self.mtvec = value & !3, // direct mode only
             0x340 => self.mscratch = value,
             0x341 => self.mepc = value & !3, // IALIGN=32
@@ -117,6 +125,21 @@ impl Machine {
             commit.register_write = Some((rd, old));
         }
         Some(Ok(commit))
+    }
+
+    /// Interrupts retain the next instruction PC; pending is cleared only by
+    /// the timer device, not by entry or software writes to mip.
+    pub fn timer_interrupt(&mut self, pc: u64, pending: bool) -> Option<u64> {
+        self.timer_pending = pending;
+        if pending && self.mie & (1 << 7) != 0 && self.mstatus & MIE != 0 {
+            self.mepc = pc;
+            self.mcause = (1 << 63) | 7;
+            self.mtval = 0;
+            self.mstatus = MPP | ((self.mstatus & MIE) << 4);
+            Some(self.mtvec)
+        } else {
+            None
+        }
     }
 
     /// Trap entry does not retire the faulting instruction.
@@ -218,5 +241,26 @@ mod tests {
             ..fault
         });
         assert_eq!((m.mcause, m.mtval, m.mstatus), (6, 17, MPP));
+    }
+
+    #[test]
+    fn timer_is_level_triggered_maskable_and_does_not_advance_pc() {
+        let mut m = Machine::default();
+        m.write(0x305, 0x1000);
+        assert_eq!(m.timer_interrupt(0x400, true), None);
+        assert_eq!(m.read(0x344), Some(128));
+        m.write(0x300, MIE);
+        assert_eq!(m.timer_interrupt(0x400, true), None); // MTIE is off
+        m.write(0x304, 128);
+        assert_eq!(m.timer_interrupt(0x400, true), Some(0x1000));
+        assert_eq!((m.mepc, m.mcause, m.mtval), (0x400, (1 << 63) | 7, 0));
+        assert_eq!(m.timer_interrupt(0x1000, true), None); // trap masks MIE
+        m.write(0x344, 0);
+        assert_eq!(m.read(0x344), Some(128)); // software cannot acknowledge MTIP
+        m.execute(0, 0x3020_0073, &[0; 32]).unwrap().unwrap();
+        assert_eq!(m.timer_interrupt(0x400, true), Some(0x1000)); // still pending
+        m.execute(0, 0x3020_0073, &[0; 32]).unwrap().unwrap();
+        assert_eq!(m.timer_interrupt(0x400, false), None); // device acknowledged
+        assert_eq!(m.read(0x344), Some(0));
     }
 }

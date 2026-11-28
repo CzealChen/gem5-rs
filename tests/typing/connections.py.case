@@ -1,4 +1,4 @@
-from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, Rv64Core, SimpleUart, Tick, Traffic
+from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, Rv64Core, MachineTimer, WallTimerClock, SimpleUart, Tick, Traffic
 
 
 def assemble() -> None:
@@ -14,3 +14,7 @@ def assemble() -> None:
     board.connect(one.requests, console)  # error: Argument 2 to "connect" of "Board" has incompatible type "TargetHandle"; expected "TargetIn"
 
     Rv64Core(elf=b"", stack_pointer=Address(64), machine_mode="yes")  # error: Argument "machine_mode" to "Rv64Core" has incompatible type "str"; expected "bool"
+    core = board.add(Rv64Core(elf=b"", stack_pointer=Address(64), machine_mode=True))
+    timer = board.add(MachineTimer(Address(4096), WallTimerClock(1_000_000), Tick(1)))
+    board.connect_interrupt(core.requests, core.timer_interrupt)  # error: Argument 1 to "connect_interrupt" of "Board" has incompatible type "RequestOut"; expected "InterruptOut"
+    board.connect(timer.interrupt, timer.input)  # error: Argument 1 to "connect" of "Board" has incompatible type "InterruptOut"; expected "RequestOut"

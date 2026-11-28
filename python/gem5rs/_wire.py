@@ -108,6 +108,7 @@ def _statistics(value: object) -> Statistics:
         reads=_uint(stats["reads"]),
         writes=_uint(stats["writes"]),
         committed=_uint(stats["committed"]),
+        timer_interrupts=_uint(stats.get("timer_interrupts", 0)),
     )
 
 

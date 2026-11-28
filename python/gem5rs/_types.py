@@ -56,6 +56,23 @@ class SimpleUart:
 
 
 @dataclass(frozen=True, slots=True)
+class SimulatedTimerClock:
+    tick_period: Tick
+
+
+@dataclass(frozen=True, slots=True)
+class WallTimerClock:
+    frequency_hz: int
+
+
+@dataclass(frozen=True, slots=True)
+class MachineTimer:
+    addr: Address
+    clock: SimulatedTimerClock | WallTimerClock
+    latency: Tick
+
+
+@dataclass(frozen=True, slots=True)
 class ExperimentConfig:
     tick_femtoseconds: int
     instruction_budget: int
@@ -110,6 +127,31 @@ class TargetIn:
 @dataclass(frozen=True, slots=True)
 class RequestorHandle:
     requests: RequestOut
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptOut:
+    _graph_id: int
+    _node: int
+    _port: int
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptIn:
+    _graph_id: int
+    _node: int
+    _port: int
+
+
+@dataclass(frozen=True, slots=True)
+class CoreHandle(RequestorHandle):
+    timer_interrupt: InterruptIn
+
+
+@dataclass(frozen=True, slots=True)
+class TimerHandle:
+    input: TargetIn
+    interrupt: InterruptOut
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +232,7 @@ class Statistics:
     reads: int
     writes: int
     committed: int
+    timer_interrupts: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,6 +9,7 @@ pub(super) struct Graph {
     graph_id: u64,
     nodes: Vec<Node>,
     connections: Vec<Connection>,
+    interrupt_connections: Vec<Connection>,
 }
 
 #[derive(Deserialize)]
@@ -17,6 +18,8 @@ struct RawGraph {
     graph_id: u64,
     nodes: Vec<Value>,
     connections: Vec<Value>,
+    #[serde(default)]
+    interrupt_connections: Vec<Connection>,
 }
 
 struct Node {
@@ -60,6 +63,11 @@ enum Model {
     SimpleUart {
         addr: u64,
         size_bytes: u64,
+        latency: u64,
+    },
+    MachineTimer {
+        addr: u64,
+        clock: crate::timer::ClockConfig,
         latency: u64,
     },
     Router {
@@ -145,6 +153,11 @@ pub(super) struct Mount {
 }
 
 pub(super) enum MountTarget {
+    Timer {
+        base: u64,
+        clock: crate::timer::ClockConfig,
+        latency: std::num::NonZeroU64,
+    },
     Memory(memory::Route),
     Console {
         base: u64,
@@ -163,6 +176,7 @@ impl Graph {
             graph_id,
             nodes,
             connections,
+            interrupt_connections,
         } = serde_json::from_str(json).context(DecodeSnafu {
             location: "board graph",
         })?;
@@ -197,6 +211,7 @@ impl Graph {
             graph_id,
             nodes,
             connections,
+            interrupt_connections,
         })
     }
 
@@ -239,6 +254,7 @@ impl Graph {
     }
 
     pub fn plan(&self) -> Result<Plan, ConfigError> {
+        self.check_interrupts()?;
         let mut outgoing = BTreeMap::new();
         let mut incoming = BTreeMap::new();
         for (i, edge) in self.connections.iter().enumerate() {
@@ -417,6 +433,50 @@ impl Graph {
         Ok(Plan { sources, routes })
     }
 
+    fn check_interrupts(&self) -> Result<(), ConfigError> {
+        let timers: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| matches!(n.model, Model::MachineTimer { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        if timers.len() > 1 {
+            return Err("a single-hart board supports at most one machine timer".into());
+        }
+        if self.interrupt_connections.len() != timers.len() {
+            return Err("each machine timer needs exactly one interrupt connection".into());
+        }
+        for edge in &self.interrupt_connections {
+            for endpoint in [&edge.source, &edge.target] {
+                if endpoint.graph_id != self.graph_id
+                    || endpoint.port != 0
+                    || endpoint.node >= self.nodes.len() as u64
+                {
+                    return Err(
+                        "invalid interrupt endpoint or cross-board interrupt connection".into(),
+                    );
+                }
+            }
+            if !matches!(
+                self.nodes[edge.source.node as usize].model,
+                Model::MachineTimer { .. }
+            ) || !matches!(
+                self.nodes[edge.target.node as usize].model,
+                Model::Rv64Core {
+                    machine_mode: true,
+                    ..
+                }
+            ) {
+                return Err(
+                    "interrupt connection must go from a machine timer to a machine-mode core"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn label(&self, (id, index): Port, side: Side) -> String {
         self.nodes[id].port(side, index)
     }
@@ -514,6 +574,35 @@ impl Node {
                 .ok_or_else(|| err("size_bytes exceeds the platform allocation limit".into()))
         };
         let router_base = window.map_or(0, |(window, _)| window.start);
+        if let Model::MachineTimer {
+            addr,
+            clock,
+            latency,
+        } = self.model
+        {
+            if addr % 8 != 0 {
+                return Err(err("timer address must be 8-byte aligned".into()));
+            }
+            let clock = clock.validate().map_err(err)?;
+            let latency = std::num::NonZeroU64::new(latency)
+                .ok_or_else(|| err("timer latency must be positive".into()))?;
+            if let Some((window, _)) = window
+                && (window.start, window.size_bytes) != (addr, 16)
+            {
+                return Err(err(
+                    "timer window must match the 16-byte register range".into()
+                ));
+            }
+            return Ok(Mount {
+                target: MountTarget::Timer {
+                    base: addr,
+                    clock,
+                    latency,
+                },
+                range: address_range(addr, 16).map_err(err)?,
+                label,
+            });
+        }
         if let Model::SimpleUart {
             addr,
             size_bytes,

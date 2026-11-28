@@ -7,9 +7,13 @@ from typing import Protocol, overload
 
 from . import _native
 from ._types import (
+    CoreHandle,
     DualBankRam,
     Exit,
     FixedRam,
+    InterruptIn,
+    InterruptOut,
+    MachineTimer,
     Read,
     RequestorHandle,
     RequestOut,
@@ -19,15 +23,26 @@ from ._types import (
     RunResult,
     Rv64Core,
     SimpleUart,
+    SimulatedTimerClock,
     TargetHandle,
     TargetIn,
+    TimerHandle,
     Traffic,
     Write,
 )
 from ._wire import decode_result
 
-type _Model = Traffic | FixedRam | DualBankRam | Exit | SimpleUart | Rv64Core | Router
-type _Handle = RequestorHandle | TargetHandle | RouterHandle
+type _Model = (
+    Traffic
+    | FixedRam
+    | DualBankRam
+    | Exit
+    | SimpleUart
+    | Rv64Core
+    | Router
+    | MachineTimer
+)
+type _Handle = RequestorHandle | TargetHandle | RouterHandle | TimerHandle
 
 _graph_ids = count(1)
 
@@ -78,6 +93,18 @@ def _node(model: _Model) -> dict[str, object]:
                 "size_bytes": size_bytes,
                 "latency": latency,
             }
+        case MachineTimer(addr, clock, latency):
+            clock_config: dict[str, object]
+            if isinstance(clock, SimulatedTimerClock):
+                clock_config = {"kind": "simulated", "tick_period": clock.tick_period}
+            else:
+                clock_config = {"kind": "wall", "frequency_hz": clock.frequency_hz}
+            return {
+                "kind": "machine_timer",
+                "addr": addr,
+                "clock": clock_config,
+                "latency": latency,
+            }
         case Rv64Core(
             elf, stack_pointer, cycle, experiment, stack_bytes, difftest, machine_mode
         ):
@@ -115,7 +142,9 @@ def _node(model: _Model) -> dict[str, object]:
             }
 
 
-def _endpoint(port: RequestOut | TargetIn) -> dict[str, int]:
+def _endpoint(
+    port: RequestOut | TargetIn | InterruptOut | InterruptIn,
+) -> dict[str, int]:
     return {"graph_id": port._graph_id, "node": port._node, "port": port._port}
 
 
@@ -126,11 +155,16 @@ class Board:
         self._graph_id = next(_graph_ids)
         self._nodes: list[dict[str, object]] = []
         self._connections: list[dict[str, dict[str, int]]] = []
+        self._interrupt_connections: list[dict[str, dict[str, int]]] = []
 
     @overload
-    def add(
-        self, model: Traffic | Rv64Core, *, name: str | None = None
-    ) -> RequestorHandle: ...
+    def add(self, model: Traffic, *, name: str | None = None) -> RequestorHandle: ...
+
+    @overload
+    def add(self, model: Rv64Core, *, name: str | None = None) -> CoreHandle: ...
+
+    @overload
+    def add(self, model: MachineTimer, *, name: str | None = None) -> TimerHandle: ...
 
     @overload
     def add(
@@ -150,7 +184,15 @@ class Board:
         node["name"] = f"{node['kind']}[{index}]" if name is None else name
         graph_id = self._graph_id
         handle: _Handle
-        if isinstance(model, Traffic | Rv64Core):
+        if isinstance(model, Rv64Core):
+            handle = CoreHandle(
+                RequestOut(graph_id, index, 0), InterruptIn(graph_id, index, 0)
+            )
+        elif isinstance(model, MachineTimer):
+            handle = TimerHandle(
+                TargetIn(graph_id, index, 0), InterruptOut(graph_id, index, 0)
+            )
+        elif isinstance(model, Traffic):
             handle = RequestorHandle(RequestOut(graph_id, index, 0))
         elif isinstance(model, Router):
             handle = RouterHandle(
@@ -170,6 +212,14 @@ class Board:
             {"source": _endpoint(source), "target": _endpoint(target)}
         )
 
+    def connect_interrupt(self, source: InterruptOut, target: InterruptIn) -> None:
+        """Connect a machine timer's interrupt level to a core."""
+        if not isinstance(source, InterruptOut) or not isinstance(target, InterruptIn):
+            raise TypeError("connect_interrupt expects an interrupt output and input")
+        self._interrupt_connections.append(
+            {"source": _endpoint(source), "target": _endpoint(target)}
+        )
+
     def build(self) -> Machine:
         """Validate and snapshot the current topology."""
         graph = json.dumps(
@@ -177,6 +227,7 @@ class Board:
                 "graph_id": self._graph_id,
                 "nodes": self._nodes,
                 "connections": self._connections,
+                "interrupt_connections": self._interrupt_connections,
             }
         )
         return _Machine(_native.build(graph))

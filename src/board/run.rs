@@ -56,6 +56,7 @@ struct Stats {
     reads: u64,
     writes: u64,
     committed: u64,
+    timer_interrupts: u64,
 }
 
 #[derive(Serialize)]
@@ -73,6 +74,10 @@ struct Transaction<'a> {
 
 pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<String, RunError> {
     let driver = start_reference(plan)?;
+    let timer = plan.routes.iter().find_map(|mount| match mount.target {
+        MountTarget::Timer { clock, .. } => Some(std::rc::Rc::new(RefCell::new(clock.build()))),
+        _ => None,
+    });
     let mut cpu = plan.sources.iter().find_map(|req| match &req.source {
         Source::Core {
             image,
@@ -85,6 +90,11 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
             let cpu = Cpu::new(image.entry, *stack_pointer, *cycle)
                 .with_trace(trace)
                 .with_machine_mode(*machine_mode);
+            let cpu = if let Some(timer) = &timer {
+                cpu.with_timer(timer.clone())
+            } else {
+                cpu
+            };
             Some(match experiment {
                 Some(config) => cpu.with_experiment(
                     crate::experiment::Experiment::new(*config).expect("validated config"),
@@ -106,6 +116,15 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
     let mut machine = memory::Machine::new(plan.sources.iter().map(|req| req.id).collect())?;
     for mount in &plan.routes {
         let mounted = match mount.target {
+            MountTarget::Timer { base, latency, .. } => machine.add_target(
+                base,
+                16,
+                &[1],
+                crate::timer::Mmio {
+                    timer: timer.as_ref().expect("validated timer").clone(),
+                    latency,
+                },
+            ),
             MountTarget::Memory(route) => machine.add_route(route),
             MountTarget::Console {
                 base,
@@ -170,6 +189,9 @@ pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<S
                 location: req.label.clone(),
             })?;
     }
+    if let Some(timer) = &timer {
+        timer.borrow_mut().reset_wall_clock();
+    }
     let result = machine
         .run(memory::RunLimits { events, ticks })
         .map_err(Into::into)
@@ -226,6 +248,7 @@ fn encode(
     let mut stats = Stats {
         events: result.events,
         committed: cpu.map_or(0, Cpu::committed),
+        timer_interrupts: cpu.map_or(0, Cpu::timer_interrupts),
         ..Stats::default()
     };
     let mut responses = BTreeMap::<_, VecDeque<_>>::new();
@@ -403,6 +426,11 @@ fn start_reference(
     let mut platform = crate::difftest::Platform::default();
     for mount in &plan.routes {
         match mount.target {
+            MountTarget::Timer { .. } => {
+                return Err("machine timer is outside the difftest protocol"
+                    .to_owned()
+                    .into());
+            }
             MountTarget::Console { base, .. } => platform.console.push(base),
             MountTarget::Memory(memory::Route { base, target }) => match target {
                 memory::Target::FixedRam { size_bytes, .. }

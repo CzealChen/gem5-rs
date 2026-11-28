@@ -11,6 +11,24 @@ from gem5rs import Address, AddressRange, BareMetalPlatform, Tick, am_test_platf
 
 
 class PlatformTests(TestCase):
+    def test_timer_frequency_and_physical_units(self) -> None:
+        timer = AddressRange(Address(0x0200_0000), 16)
+        profile = replace(am_test_platform(), timer=timer)
+        self.assertEqual(profile.timer_tick_period, Tick(1_000_000))
+        self.assertEqual(profile.timer_reload, 1000)
+        faster = replace(profile, timer_frequency_hz=2_000_000)
+        self.assertEqual(faster.timer_tick_period, Tick(500_000))
+        self.assertEqual(faster.timer_reload, 2000)
+        self.assertIn("_timer = 0x2000000", profile.linker_script())
+        with self.assertRaisesRegex(ValueError, "integer simulation tick"):
+            replace(profile, timer_frequency_hz=3_000_000)
+        # Wall clocks don't need to divide the simulator tick frequency.
+        replace(profile, timer_clock="wall", timer_frequency_hz=3_000_000)
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            replace(profile, timer=AddressRange(profile.ram.start, 16))
+        with self.assertRaisesRegex(ValueError, "integer number"):
+            replace(profile, timer_frequency_hz=1, timer_interval_us=1)
+
     def test_generated_layout_links_and_rejects_stack_overlap(self) -> None:
         platform = am_test_platform()
         with TemporaryDirectory() as directory:

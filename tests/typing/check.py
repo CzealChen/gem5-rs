@@ -79,6 +79,12 @@ def main() -> None:
             "one.requests, console)", "one.requests, console.input)"
         )
         corrected = corrected.replace('machine_mode="yes"', "machine_mode=True")
+        corrected = corrected.replace(
+            "connect_interrupt(core.requests,", "connect_interrupt(timer.interrupt,"
+        )
+        corrected = corrected.replace(
+            "connect(timer.interrupt,", "connect(core.requests,"
+        )
         case.write_text(corrected, encoding="utf-8")
         _check_clean(_mypy(mypy, interpreter, case))
 

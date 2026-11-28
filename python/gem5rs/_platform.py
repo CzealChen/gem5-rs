@@ -5,6 +5,7 @@ The layout and physical time units are independent of the CPU implementation.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 from ._types import Address, AddressRange, Tick
 
@@ -44,6 +45,10 @@ class BareMetalPlatform:
     event_budget: int
     instruction_budget: int
     m5_enabled: bool = False
+    timer: AddressRange | None = None
+    timer_clock: Literal["simulated", "wall"] = "simulated"
+    timer_frequency_hz: int = 1_000_000
+    timer_interval_us: int = 1000
 
     def __post_init__(self) -> None:
         ram_end = _end("ram", self.ram)
@@ -68,7 +73,44 @@ class BareMetalPlatform:
             )
         if type(self.m5_enabled) is not bool:
             raise ValueError("m5_enabled must be a bool")
+        if self.timer is not None:
+            timer_end = _end("timer", self.timer)
+            if self.timer.start % 8 or self.timer.size_bytes != 16:
+                raise ValueError("timer must have two aligned 64-bit registers")
+            for start, end in (
+                (self.ram.start, ram_end),
+                (self.console.start, console_end),
+            ):
+                if self.timer.start < end and start < timer_end:
+                    raise ValueError("timer overlaps RAM or console")
+            _positive_u64("timer_frequency_hz", self.timer_frequency_hz)
+            _positive_u64("timer_interval_us", self.timer_interval_us)
+            if self.timer_clock not in ("simulated", "wall"):
+                raise ValueError("timer_clock must be simulated or wall")
+            _positive_u64("timer_reload", self.timer_reload)
+            if self.timer_clock == "simulated":
+                _ = self.timer_tick_period
         self.nanoseconds(self.tick_budget)
+
+    @property
+    def timer_reload(self) -> int:
+        counts, remainder = divmod(
+            self.timer_frequency_hz * self.timer_interval_us, 1_000_000
+        )
+        if remainder:
+            raise ValueError("timer interval must be an integer number of timer counts")
+        return counts
+
+    @property
+    def timer_tick_period(self) -> Tick:
+        period, remainder = divmod(
+            1_000_000_000_000_000, self.tick_femtoseconds * self.timer_frequency_hz
+        )
+        if remainder or period == 0:
+            raise ValueError(
+                "timer frequency must resolve to an integer simulation tick period"
+            )
+        return Tick(period)
 
     @property
     def stack_top(self) -> Address:
@@ -103,6 +145,9 @@ class BareMetalPlatform:
 
     def linker_script(self) -> str:
         """Generate guest layout; no independently maintained address constants."""
+        timer_symbol = (
+            "" if self.timer is None else f"  _timer = {int(self.timer.start):#x};\n"
+        )
         return f"""OUTPUT_ARCH(riscv)
 ENTRY(_start)
 MEMORY {{ RAM (rwx) : ORIGIN = {int(self.ram.start):#x}, LENGTH = {self.ram.size_bytes:#x} }}
@@ -117,7 +162,7 @@ SECTIONS {{
   _stack_bottom = _stack_top - {self.stack_bytes:#x};
   _heap_end = _stack_bottom;
   _console = {int(self.console.start):#x};
-  ASSERT(_heap_start <= _heap_end, "image/BSS overlaps reserved stack")
+{timer_symbol}  ASSERT(_heap_start <= _heap_end, "image/BSS overlaps reserved stack")
 }}
 """
 

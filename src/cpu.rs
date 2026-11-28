@@ -36,6 +36,8 @@ enum Phase {
 pub struct Cpu {
     pc: u64,
     machine: Option<crate::machine::Machine>,
+    timer: Option<crate::timer::Line>,
+    timer_interrupts: u64,
     registers: [u64; 32],
     cycle: u64,
     phase: Phase,
@@ -57,6 +59,8 @@ impl Cpu {
         Self {
             pc: entry,
             machine: None,
+            timer: None,
+            timer_interrupts: 0,
             registers,
             cycle,
             phase: Phase::Start,
@@ -75,6 +79,15 @@ impl Cpu {
     pub fn with_machine_mode(mut self, enabled: bool) -> Self {
         self.machine = enabled.then(crate::machine::Machine::default);
         self
+    }
+
+    pub fn with_timer(mut self, timer: crate::timer::Line) -> Self {
+        self.timer = Some(timer);
+        self
+    }
+
+    pub fn timer_interrupts(&self) -> u64 {
+        self.timer_interrupts
     }
 
     pub fn pc(&self) -> u64 {
@@ -142,42 +155,57 @@ impl Cpu {
     }
 
     fn execute(&mut self, at: u64, instruction: u32) -> Result<SourceAction, Fault> {
-        if let Some(experiment) = &mut self.experiment {
-            if self.committed >= experiment.budget() {
-                self.instruction_limit = true;
-                return Ok(SourceAction::Stop("instruction budget exhausted".into()));
-            }
-            if let Some(op) = crate::m5::Operation::decode(instruction) {
-                let value = experiment
-                    .execute(
-                        op,
-                        [
-                            self.registers[crate::m5::ARG0],
-                            self.registers[crate::m5::ARG1],
-                        ],
-                        at,
-                        self.committed,
-                    )
-                    .map_err(|reason| Fault {
-                        reason,
-                        pc: self.pc,
-                        addr: None,
-                        architectural: None,
-                    })?;
-                let exit = experiment.exit();
-                let commit = riscv::Commit {
-                    pc: self.pc,
-                    instruction,
-                    next_pc: self.pc.wrapping_add(4),
-                    register_write: Some((crate::m5::RESULT, value)),
-                };
-                self.retire(at, commit, None, Some(op))?;
-                if let Some(exit) = exit {
-                    self.phase = Phase::Stopped;
-                    return Ok(SourceAction::Exit(exit.code));
-                }
+        if self
+            .experiment
+            .as_ref()
+            .is_some_and(|experiment| self.committed >= experiment.budget())
+        {
+            self.instruction_limit = true;
+            return Ok(SourceAction::Stop("instruction budget exhausted".into()));
+        }
+        if let Some(machine) = &mut self.machine {
+            let pending = self
+                .timer
+                .as_ref()
+                .is_some_and(|timer| timer.borrow().pending(at));
+            if let Some(vector) = machine.timer_interrupt(self.pc, pending) {
+                self.timer_interrupts += 1;
+                self.pc = vector;
                 return self.fetch(at);
             }
+        }
+        if let Some(experiment) = &mut self.experiment
+            && let Some(op) = crate::m5::Operation::decode(instruction)
+        {
+            let value = experiment
+                .execute(
+                    op,
+                    [
+                        self.registers[crate::m5::ARG0],
+                        self.registers[crate::m5::ARG1],
+                    ],
+                    at,
+                    self.committed,
+                )
+                .map_err(|reason| Fault {
+                    reason,
+                    pc: self.pc,
+                    addr: None,
+                    architectural: None,
+                })?;
+            let exit = experiment.exit();
+            let commit = riscv::Commit {
+                pc: self.pc,
+                instruction,
+                next_pc: self.pc.wrapping_add(4),
+                register_write: Some((crate::m5::RESULT, value)),
+            };
+            self.retire(at, commit, None, Some(op))?;
+            if let Some(exit) = exit {
+                self.phase = Phase::Stopped;
+                return Ok(SourceAction::Exit(exit.code));
+            }
+            return self.fetch(at);
         }
         if let Some(machine) = &mut self.machine
             && let Some(result) = machine.execute(self.pc, instruction, &self.registers)

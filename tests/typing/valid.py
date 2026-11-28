@@ -5,11 +5,13 @@ from gem5rs import (
     AddressRange,
     Board,
     Commit,
+    CoreHandle,
     DifftestStatistics,
     DualBankRam,
     Exit,
     Fault,
     FixedRam,
+    MachineTimer,
     Read,
     RequestorHandle,
     Router,
@@ -17,12 +19,15 @@ from gem5rs import (
     RunLimit,
     Rv64Core,
     SimpleUart,
+    SimulatedTimerClock,
     Statistics,
     StopReason,
     TargetHandle,
     Tick,
+    TimerHandle,
     Traffic,
     Transaction,
+    WallTimerClock,
     Write,
 )
 
@@ -58,7 +63,7 @@ def assemble(elf: bytes) -> None:
         )
     )
     assert_type(traffic, RequestorHandle)
-    assert_type(core, RequestorHandle)
+    assert_type(core, CoreHandle)
     assert_type(ram, TargetHandle)
     assert_type(exit_port, TargetHandle)
     assert_type(router, RouterHandle)
@@ -77,3 +82,28 @@ def assemble(elf: bytes) -> None:
     assert_type(result.commits[0].pc, Address)
     assert_type(result.stats, Statistics)
     assert_type(result.difftest, DifftestStatistics | None)
+
+
+def timer_assembly(elf: bytes) -> None:
+    board = Board()
+    core = board.add(Rv64Core(elf, Address(0x80010000), machine_mode=True))
+    timer = board.add(
+        MachineTimer(Address(0x2000000), SimulatedTimerClock(Tick(1000)), Tick(10))
+    )
+    assert_type(timer, TimerHandle)
+    ram = board.add(FixedRam(65536, Tick(1), 1))
+    router = board.add(
+        Router(
+            1,
+            [
+                AddressRange(Address(0x80000000), 65536),
+                AddressRange(Address(0x2000000), 16),
+            ],
+        )
+    )
+    board.connect(core.requests, router.inputs[0])
+    board.connect(router.outputs[0], ram.input)
+    board.connect(router.outputs[1], timer.input)
+    board.connect_interrupt(timer.interrupt, core.timer_interrupt)
+    # Wall time is an alternative clock configuration on the same device/ports.
+    MachineTimer(Address(0x2000000), WallTimerClock(frequency_hz=1_000_000), Tick(10))

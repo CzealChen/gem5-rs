@@ -62,7 +62,7 @@ fn ingress_priority_controls_read_visibility_and_backpressure() {
     assert_eq!(
         result["stats"],
         json!({"events": 10, "accepted": 2, "rejected": 1, "retries": 1,
-                                    "fetches": 0, "reads": 1, "writes": 1, "committed": 0})
+                                    "fetches": 0, "reads": 1, "writes": 1, "committed": 0, "timer_interrupts": 0})
     );
     assert_eq!(run_board(&board, 100), result);
 
