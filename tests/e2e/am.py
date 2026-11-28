@@ -5,6 +5,7 @@ from dataclasses import replace
 from am_benchmark import ROOT, InputSize, build_guest, run_guest, validate
 from gem5rs import (
     AddressRange,
+    ConfigurationError,
     DifftestConfig,
     SimulationError,
     StopReason,
@@ -114,6 +115,43 @@ def main() -> None:
         assert "required heap" in str(error)
     else:
         raise AssertionError("huge must reject insufficient RAM before simulation")
+    os_platform = replace(
+        platform, instruction_budget=3_000_000, event_budget=24_000_000
+    )
+    os_guest = build_guest(os_platform, "yield-os")
+    os_result = run_guest(os_guest.elf.read_bytes(), os_platform, machine_mode=True)
+    assert validate(os_result, "yield-os") == [
+        {"name": "yield-os", "status": "bounded-progress"}
+    ]
+    assert os_result.stats.committed == os_platform.instruction_budget
+    disabled = run_guest(os_guest.elf.read_bytes(), os_platform)
+    assert disabled.stop_reason == StopReason.FAULT
+    assert disabled.fault is not None and "IllegalInstruction" in disabled.fault.reason
+    small = replace(os_platform, instruction_budget=2000)
+    traced = run_guest(os_guest.elf.read_bytes(), small, machine_mode=True, trace=True)
+    summary_os = run_guest(os_guest.elf.read_bytes(), small, machine_mode=True)
+    assert summary_os == replace(traced, transactions=(), commits=())
+    for incomplete in (
+        replace(os_result, console=os_result.console[:1]),
+        replace(os_result, stop_reason=StopReason.TICK_LIMIT),
+    ):
+        try:
+            validate(incomplete, "yield-os")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "OS progress requires repeated alternation and the expected stop"
+            )
+    try:
+        run_guest(
+            os_guest.elf.read_bytes(), small, machine_mode=True, difftest=reference
+        )
+    except ConfigurationError as error:
+        assert "machine_mode" in str(error)
+    else:
+        raise AssertionError("unsupported OS difftest must reject before execution")
+    print("yield-os: repeated A/B context switches passed")
     print(
         f"AM test: ten self-checks passed, commits={result.stats.committed}, tick={result.final_tick}"
     )

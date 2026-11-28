@@ -1,7 +1,11 @@
 # Platform overlay for the unchanged upstream AM Makefile.
 CROSS_COMPILE := riscv64-none-elf-
 ARCH_H := arch/riscv.h
-COMMON := -march=rv64i -mabi=lp64 -mcmodel=medany -mno-relax -msmall-data-limit=0 -mstrict-align
+ISA_FLAGS := rv64i
+ifeq ($(WORKLOAD),yield-os)
+ISA_FLAGS := rv64i_zicsr
+endif
+COMMON := -march=$(ISA_FLAGS) -mabi=lp64 -mcmodel=medany -mno-relax -msmall-data-limit=0 -mstrict-align
 CFLAGS += $(COMMON) -ffreestanding -fno-pic -fno-pie -fwrapv -ffunction-sections -fdata-sections
 ASFLAGS += $(COMMON)
 LDSCRIPTS := $(PLATFORM_LD)

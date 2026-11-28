@@ -6,6 +6,9 @@ SRCS := runner.c $(filter-out src/bench.c,$(shell find src/ -name "*.c" -o -name
 ifeq ($(WORKLOAD),hello)
 SRCS := hello.c
 endif
+ifeq ($(WORKLOAD),yield-os)
+SRCS := yield-os.c cte.c trap.S
+endif
 INC_PATH := $(CURDIR)/include
 export ARCH AM_HOME PLATFORM_LD
 include $(AM_HOME)/Makefile

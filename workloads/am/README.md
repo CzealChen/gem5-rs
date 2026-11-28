@@ -13,6 +13,8 @@ Make, tests the platform, and writes `target/am-results/acceptance.json`.
 reference protocol, error injection and process failures. CI runs all three.
 AM acceptance compares hello and all ten test algorithms with Spike, checks
 difftest on/off invariance, and records protocol/source identity and sync counts.
+It also checks bounded `yield-os` progress, trace invariance, and rejection of
+unsupported machine-mode difftest.
 
 For interactive runs inside `devenv shell`:
 
@@ -21,6 +23,7 @@ maturin develop --release
 python -m tools.am_benchmark --workload hello --display
 python -m tools.am_benchmark --workload microbench --difftest --display --output target/am-results/test.json
 python -m tools.am_benchmark --workload microbench --build-only
+python -m tools.am_benchmark --workload yield-os --display --output target/am-results/yield-os.json
 ```
 
 ## Build and runtime boundary
@@ -120,3 +123,38 @@ Python assembly can pass `DifftestConfig(adapter=...)` to `Rv64Core.difftest`.
 `RunResult.difftest` is optional typed statistics; without an observer no reference
 process or per-instruction communication is used. Protocol and supported-state
 boundaries are documented in [the adapter README](../../tools/spike/README.md).
+
+## Cooperative OS workload
+
+`yield-os` compiles the unchanged upstream kernel with RV64I + Zicsr/LP64 and
+selects `Rv64Core(machine_mode=True)`; all other current workloads keep the default
+RV64I fault-stopping behavior. The native call signatures are unchanged: this
+optional typed core setting is serialized through the existing board graph.
+
+The core supports M-only synchronous traps, direct `mtvec`, six CSR instruction
+forms, and `mret`. Implemented CSRs are `mstatus`, fixed `misa`, `mtvec`, `mscratch`,
+`mepc`, `mcause`, `mtval`, and read-only hart-zero `mhartid`. MPP is fixed to M;
+unsupported status bits read zero, `mtvec` mode is fixed to direct and `mepc` is
+four-byte aligned. Unknown CSR accesses trap; write attempts to `mhartid` trap.
+Misalignment/access faults, illegal instructions, breakpoints and machine ecalls
+enter the guest handler without retiring the faulting instruction. Simulator
+protocol failures remain terminal. There are no asynchronous interrupts, U/S
+privilege modes, MMU or multicore support in this feature.
+
+`cte.c` implements `cte_init/kcontext/yield`; `trap.S` saves/restores all GPRs,
+original SP and machine return state, and switches to the context selected by the
+handler. Compile-time assertions verify the upstream `Context` layout. The
+assembly derives from AbstractMachine `am/src/riscv/npc/trap.S` at the pinned
+commit `068dc8cc150c63388fc5f457ff7b7dd70c5dd0f5`, copyright 2018–2021 Yanyan Jiang
+and Zihao Yu, under [its MIT license](../../third_party/abstract-machine/LICENSE).
+The original template's frame layout and SP/context switching are not copied
+unchanged. CPU CSR/trap semantics follow the [RISC-V Machine-Level ISA](https://docs.riscv.org/reference/isa/priv/machine.html).
+
+This upstream program never exits. The default 3 million retired instructions,
+24 million events and 10 billion ticks produce `ABABAB`. Acceptance requires an
+instruction-budget stop, no fault, and at least four strictly alternating letters;
+it reports `bounded-progress`, not successful guest termination. A smaller budget
+may be useful for diagnosis but will fail acceptance if it shows too little progress.
+`--difftest` is explicitly rejected for this mode until the reference protocol
+compares machine state and trap transitions. `thread-os` still requires timer
+preemption and the remaining AM interfaces.

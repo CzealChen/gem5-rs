@@ -49,7 +49,7 @@ EXPECTED = (
     "md5",
 )
 DEFAULT_RAM_LATENCY = Tick(1000)
-type Workload = Literal["hello", "microbench"]
+type Workload = Literal["hello", "microbench", "yield-os"]
 type InputSize = Literal["test", "train", "ref", "huge"]
 HEAP_BYTES: dict[InputSize, int] = {
     "test": 128 * 1024,
@@ -97,7 +97,7 @@ def build_guest(
 ) -> GuestBuild:
     """Content-address sources, overlay, layout and toolchain; let Make compile."""
     mainargs = input_size(mainargs)
-    if workload == "hello" and mainargs != "test":
+    if workload != "microbench" and mainargs != "test":
         raise ValueError("input selection is only supported for microbench")
     compiler = subprocess.check_output(
         ["riscv64-none-elf-gcc", "--version"], text=True
@@ -149,6 +149,13 @@ def build_guest(
         for name in ("runner.c", "hello.c"):
             shutil.copyfile(ROOT / "workloads/am" / name, work / name)
         (runtime / "mainargs.h").write_text(f'#define GEM5RS_MAINARGS "{mainargs}"\n')
+        if workload == "yield-os":
+            shutil.copyfile(
+                ROOT / "third_party/am-kernels/kernels/yield-os/yield-os.c",
+                work / "yield-os.c",
+            )
+            for name in ("cte.c", "trap.S"):
+                shutil.copyfile(ROOT / "workloads/am" / name, work / name)
         script = work / "platform.ld"
         script.write_text(platform.linker_script())
         env = os.environ.copy()
@@ -174,8 +181,9 @@ def build_guest(
         subprocess.run([*command, "image"], cwd=work, env=env, check=True)
         # LP64 (soft-float), no RVC; Rust additionally validates segments at build().
         attributes = elf.with_suffix(".attributes").read_text()
+        isa = "rv64i2p1_zicsr2p0" if workload == "yield-os" else "rv64i2p1"
         if not re.search(
-            r'Tag_RISCV_arch:\s+"rv64i2p1"\s*$', attributes, re.MULTILINE
+            rf'Tag_RISCV_arch:\s+"{isa}"\s*$', attributes, re.MULTILINE
         ) or not re.search(r"Flags:\s+0x0\s*$", attributes, re.MULTILINE):
             raise ValueError(f"unexpected guest ISA/ABI attributes: {attributes}")
         symbols = subprocess.check_output(
@@ -238,6 +246,7 @@ def run_guest(
     ram_latency: Tick = DEFAULT_RAM_LATENCY,
     trace: bool = False,
     difftest: DifftestConfig | None = None,
+    machine_mode: bool = False,
 ) -> RunResult:
     board = Board()
     core = board.add(
@@ -247,6 +256,7 @@ def run_guest(
             cycle=platform.cpu_period,
             stack_bytes=platform.stack_bytes,
             difftest=difftest,
+            machine_mode=machine_mode,
             experiment=ExperimentConfig(
                 platform.tick_femtoseconds, platform.instruction_budget
             )
@@ -272,6 +282,18 @@ def run_guest(
 
 
 def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
+    if workload == "yield-os":
+        output = bytes(byte.value for byte in result.console).decode("ascii")
+        if (
+            result.stop_reason != StopReason.INSTRUCTION_LIMIT
+            or result.fault is not None
+            or len(output) < 4
+            or output != ("AB" * ((len(output) + 1) // 2))[: len(output)]
+        ):
+            raise ValueError(
+                f"yield-os did not make alternating progress: {result.stop_reason}, {output!r}, {result.fault}"
+            )
+        return [{"name": "yield-os", "status": "bounded-progress"}]
     if result.stop_reason != StopReason.EXIT or result.exit_code != 0:
         raise ValueError(
             f"guest did not succeed: {result.stop_reason}, {result.exit_code}, {result.fault}"
@@ -298,7 +320,7 @@ def validate(result: RunResult, workload: Workload) -> list[dict[str, str]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--workload", choices=("hello", "microbench"), default="microbench"
+        "--workload", choices=("hello", "microbench", "yield-os"), default="microbench"
     )
     parser.add_argument(
         "--input", choices=("test", "train", "ref", "huge"), default="test"
@@ -308,8 +330,8 @@ def main() -> None:
         type=positive_int,
         help="RAM MiB (default: 128 for huge, otherwise 16)",
     )
-    parser.add_argument("--instruction-budget", type=positive_int, default=2_000_000)
-    parser.add_argument("--event-budget", type=positive_int, default=12_000_000)
+    parser.add_argument("--instruction-budget", type=positive_int, default=None)
+    parser.add_argument("--event-budget", type=positive_int, default=None)
     parser.add_argument("--tick-budget", type=positive_int, default=10_000_000_000)
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--display", action="store_true")
@@ -323,15 +345,25 @@ def main() -> None:
     )
     args = parser.parse_args()
     raw_workload: object = args.workload
-    if raw_workload not in ("hello", "microbench"):
+    if raw_workload not in ("hello", "microbench", "yield-os"):
         raise ValueError("unsupported workload")
-    workload: Workload = "hello" if raw_workload == "hello" else "microbench"
+    workload: Workload = (
+        "hello"
+        if raw_workload == "hello"
+        else "yield-os"
+        if raw_workload == "yield-os"
+        else "microbench"
+    )
     destination: object = args.output
     if not isinstance(destination, Path):
         raise TypeError("output must be a path")
     mainargs = input_size(args.input)
-    if workload == "hello" and mainargs != "test":
+    if workload != "microbench" and mainargs != "test":
         parser.error("--input is only supported for microbench")
+    if workload == "yield-os" and args.difftest:
+        parser.error(
+            "yield-os machine mode is not supported by the current difftest protocol"
+        )
     base = am_test_platform()
     ram_mib = (
         positive_option(args.ram_mib)
@@ -341,8 +373,12 @@ def main() -> None:
     platform = replace(
         base,
         ram=AddressRange(base.ram.start, ram_mib * 1024 * 1024),
-        instruction_budget=positive_option(args.instruction_budget),
-        event_budget=positive_option(args.event_budget),
+        instruction_budget=positive_option(args.instruction_budget)
+        if args.instruction_budget is not None
+        else (3_000_000 if workload == "yield-os" else base.instruction_budget),
+        event_budget=positive_option(args.event_budget)
+        if args.event_budget is not None
+        else (24_000_000 if workload == "yield-os" else base.event_budget),
         tick_budget=Tick(positive_option(args.tick_budget)),
     )
     build = build_guest(platform, workload, mainargs)
@@ -355,7 +391,12 @@ def main() -> None:
         difftest = DifftestConfig(str(ROOT / "target/spike/adapter"))
     start = time.perf_counter()
     try:
-        result = run_guest(build.elf.read_bytes(), platform, difftest=difftest)
+        result = run_guest(
+            build.elf.read_bytes(),
+            platform,
+            difftest=difftest,
+            machine_mode=workload == "yield-os",
+        )
     except SimulationError as error:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
@@ -379,11 +420,12 @@ def main() -> None:
     host_seconds = time.perf_counter() - start
     console = bytes(byte.value for byte in result.console).decode("ascii")
     if args.display:
-        print(console, end="", flush=True)
+        print(console, end="\n" if workload == "yield-os" else "", flush=True)
     report: dict[str, object] = {
         "workload": workload,
         "mainargs": mainargs,
-        "expected_items": ["hello"] if workload == "hello" else list(EXPECTED),
+        "expected_items": list(EXPECTED) if workload == "microbench" else [workload],
+        "machine_mode": workload == "yield-os",
         "excluded_by_configuration": [],
         "build_key": build.key,
         "elf_sha256": build.elf_sha256,
