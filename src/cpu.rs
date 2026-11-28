@@ -40,6 +40,8 @@ pub struct Cpu {
     next_id: u64,
     commits: Vec<Commit>,
     fault: Option<Fault>,
+    experiment: Option<crate::experiment::Experiment>,
+    instruction_limit: bool,
 }
 
 impl Cpu {
@@ -54,11 +56,26 @@ impl Cpu {
             next_id: 0,
             commits: Vec::new(),
             fault: None,
+            experiment: None,
+            instruction_limit: false,
         }
     }
 
     pub fn pc(&self) -> u64 {
         self.pc
+    }
+
+    pub fn with_experiment(mut self, experiment: crate::experiment::Experiment) -> Self {
+        self.experiment = Some(experiment);
+        self
+    }
+
+    pub fn experiment(&self) -> Option<&crate::experiment::Experiment> {
+        self.experiment.as_ref()
+    }
+
+    pub fn instruction_limit(&self) -> bool {
+        self.instruction_limit
     }
 
     pub fn registers(&self) -> &[u64; 32] {
@@ -92,6 +109,42 @@ impl Cpu {
     }
 
     fn execute(&mut self, at: u64, instruction: u32) -> Result<SourceAction, Fault> {
+        if let Some(experiment) = &mut self.experiment {
+            if self.commits.len() as u64 >= experiment.budget() {
+                self.instruction_limit = true;
+                return Ok(SourceAction::Stop("instruction budget exhausted".into()));
+            }
+            if let Some(op) = crate::m5::Operation::decode(instruction) {
+                let value = experiment
+                    .execute(
+                        op,
+                        [
+                            self.registers[crate::m5::ARG0],
+                            self.registers[crate::m5::ARG1],
+                        ],
+                        at,
+                        self.commits.len() as u64,
+                    )
+                    .map_err(|reason| Fault {
+                        reason,
+                        pc: self.pc,
+                        addr: None,
+                    })?;
+                let exit = experiment.exit();
+                let commit = riscv::Commit {
+                    pc: self.pc,
+                    instruction,
+                    next_pc: self.pc.wrapping_add(4),
+                    register_write: Some((crate::m5::RESULT, value)),
+                };
+                self.retire(at, commit);
+                if let Some(exit) = exit {
+                    self.phase = Phase::Stopped;
+                    return Ok(SourceAction::Exit(exit.code));
+                }
+                return self.fetch(at);
+            }
+        }
         match riscv::execute(self.pc, instruction, &self.registers)
             .map_err(|fault| isa_fault(fault, None))?
         {
@@ -110,6 +163,11 @@ impl Cpu {
     }
 
     fn commit(&mut self, at: u64, commit: riscv::Commit) -> Result<SourceAction, Fault> {
+        self.retire(at, commit);
+        self.fetch(at)
+    }
+
+    fn retire(&mut self, at: u64, commit: riscv::Commit) {
         commit.apply(&mut self.pc, &mut self.registers);
         self.commits.push(Commit {
             at,
@@ -122,7 +180,6 @@ impl Cpu {
                     value,
                 }),
         });
-        self.fetch(at)
     }
 }
 

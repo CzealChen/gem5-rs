@@ -21,9 +21,10 @@ struct Configuration(board::Configuration);
 
 #[pymethods]
 impl Configuration {
-    fn run(&self, py: Python<'_>, events: u64) -> PyResult<String> {
+    #[pyo3(signature = (events, ticks = u64::MAX, trace = true))]
+    fn run(&self, py: Python<'_>, events: u64, ticks: u64, trace: bool) -> PyResult<String> {
         self.0
-            .run(events)
+            .run_with_options(events, ticks, trace)
             .map_err(|e| chain(py, &e, SimulationError::new_err))
     }
 }

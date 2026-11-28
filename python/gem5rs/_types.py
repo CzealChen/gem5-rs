@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,10 +49,25 @@ class Exit:
 
 
 @dataclass(frozen=True, slots=True)
+class SimpleUart:
+    addr: Address
+    size_bytes: int
+    latency: Tick
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentConfig:
+    tick_femtoseconds: int
+    instruction_budget: int
+
+
+@dataclass(frozen=True, slots=True)
 class Rv64Core:
     elf: bytes
     stack_pointer: Address
     cycle: Tick = Tick(1)
+    experiment: ExperimentConfig | None = None
+    stack_bytes: int = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +116,18 @@ class RouterHandle:
 @dataclass(frozen=True, slots=True)
 class RunLimit:
     events: int
+    ticks: Tick = Tick((1 << 64) - 1)
+    trace: bool = True
 
 
 class StopReason(StrEnum):
     IDLE = "idle"
     EVENT_LIMIT = "event_limit"
+    TICK_LIMIT = "tick_limit"
+    INSTRUCTION_LIMIT = "instruction_limit"
     EXIT = "exit"
     FAULT = "fault"
+    FAIL = "fail"
 
 
 class AccessKind(StrEnum):
@@ -169,3 +191,19 @@ class RunResult:
     transactions: tuple[Transaction, ...]
     commits: tuple[Commit, ...]
     stats: Statistics
+    console: tuple[ConsoleByte, ...] = ()
+    regions: tuple[Region, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ConsoleByte:
+    at: Tick
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
+class Region:
+    id: int
+    begin_tick: Tick
+    end_tick: Tick
+    committed: int

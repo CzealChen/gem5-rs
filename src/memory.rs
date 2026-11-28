@@ -71,6 +71,7 @@ pub enum SourceAction {
     },
     WakeAt(u64),
     Stop(String),
+    Exit(u64),
 }
 
 /// A request producer driven by its timers and transaction responses.
@@ -113,6 +114,9 @@ pub struct Route {
 /// Offsets are relative to the route's base. The machine checks that the complete
 /// access fits inside the route before calling the target.
 pub trait MemoryTarget {
+    /// Exactly-once notification after acceptance and response scheduling.
+    /// Rejected requests never reach this method.
+    fn accepted(&mut self, _at: u64, _offset: usize, _request: &Request) {}
     /// Validate the request and choose a lane from the registered capacities at arrival.
     /// Retries use the same lane and preserve the original request.
     fn select_lane(&self, offset: usize, request: &Request) -> Result<usize, Fault>;
@@ -557,6 +561,10 @@ impl<'a> Machine<'a> {
                     self.stopping = Some(StopReason::SourceStopped { source: id, reason });
                     break;
                 }
+                SourceAction::Exit(code) => {
+                    self.stopping = Some(StopReason::Exit(code));
+                    break;
+                }
             }
         }
         Ok(())
@@ -677,6 +685,14 @@ impl<'a> Machine<'a> {
             .schedule(complete_at, COMPLETE, Event::Complete { tx, slot })?;
         self.transactions[tx].accepted_at = Some(at);
         self.in_flight += 1;
+        if let Ok(slot) = slot {
+            let request = &self.transactions[tx].request;
+            self.routes.get_mut(&slot.base).unwrap().target.accepted(
+                at,
+                (request.address - slot.base) as usize,
+                request,
+            );
+        }
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use super::graph::{Plan, Scheduled, Source};
+use super::graph::{MountTarget, Plan, Scheduled, Source};
 use super::{EncodeSnafu, EngineSnafu, RunError};
 use crate::{cpu::Cpu, memory};
 use serde::Serialize;
@@ -71,24 +71,47 @@ struct Transaction<'a> {
     fault: Option<memory::Fault>,
 }
 
-pub(super) fn run(plan: &Plan, events: u64) -> Result<String, RunError> {
+pub(super) fn run(plan: &Plan, events: u64, ticks: u64, trace: bool) -> Result<String, RunError> {
     let mut cpu = plan.sources.iter().find_map(|req| match &req.source {
         Source::Core {
             image,
             stack_pointer,
             cycle,
-        } => Some(Cpu::new(image.entry, *stack_pointer, *cycle)),
+            experiment,
+        } => {
+            let cpu = Cpu::new(image.entry, *stack_pointer, *cycle);
+            Some(match experiment {
+                Some(config) => cpu.with_experiment(
+                    crate::experiment::Experiment::new(*config).expect("validated config"),
+                ),
+                None => cpu,
+            })
+        }
         _ => None,
     });
     let deliveries = DeliveryLog::default();
+    let console = RefCell::new(Vec::new());
     let mut machine = memory::Machine::new(plan.sources.iter().map(|req| req.id).collect())?;
     for mount in &plan.routes {
-        machine
-            .add_route(mount.route)
-            .map_err(Into::into)
-            .with_context(|_| EngineSnafu {
-                location: mount.label.clone(),
-            })?;
+        let mounted = match mount.target {
+            MountTarget::Memory(route) => machine.add_route(route),
+            MountTarget::Console {
+                base,
+                size,
+                latency,
+            } => machine.add_target(
+                base,
+                size,
+                &[1],
+                crate::console::SimpleUart {
+                    latency,
+                    output: &console,
+                },
+            ),
+        };
+        mounted.map_err(Into::into).with_context(|_| EngineSnafu {
+            location: mount.label.clone(),
+        })?;
     }
     let names = plan
         .sources
@@ -136,15 +159,19 @@ pub(super) fn run(plan: &Plan, events: u64) -> Result<String, RunError> {
             })?;
     }
     let result = machine
-        .run(memory::RunLimits {
-            events,
-            ticks: u64::MAX,
-        })
+        .run(memory::RunLimits { events, ticks })
         .map_err(Into::into)
         .context(EngineSnafu {
             location: "event queue",
         })?;
-    encode(&result, deliveries.into_inner(), &names, cpu.as_ref())
+    encode(
+        &result,
+        deliveries.into_inner(),
+        &names,
+        cpu.as_ref(),
+        console.into_inner(),
+        trace,
+    )
 }
 
 fn encode(
@@ -152,6 +179,8 @@ fn encode(
     deliveries: Vec<(usize, u64)>,
     names: &BTreeMap<usize, &str>,
     cpu: Option<&Cpu>,
+    console: Vec<crate::console::Byte>,
+    trace: bool,
 ) -> Result<String, RunError> {
     let commits = cpu.map_or(&[][..], Cpu::commits);
     let mut stats = Stats {
@@ -191,24 +220,27 @@ fn encode(
         };
         let id = tx.request.id;
         let source = tx.request.source;
-        responses
-            .entry((source, id))
-            .or_default()
-            .push_back(Transaction {
-                id,
-                source: names[&source],
-                addr: tx.request.address,
-                kind,
-                size_bytes,
-                accepted_at,
-                completed_at,
-                data,
-                fault,
-            });
+        if trace {
+            responses
+                .entry((source, id))
+                .or_default()
+                .push_back(Transaction {
+                    id,
+                    source: names[&source],
+                    addr: tx.request.address,
+                    kind,
+                    size_bytes,
+                    accepted_at,
+                    completed_at,
+                    data,
+                    fault,
+                });
+        }
     }
     // A completed operation can still be awaiting its response when the budget expires.
     let transactions = deliveries
         .into_iter()
+        .filter(|_| trace)
         .map(|key| {
             responses
                 .get_mut(&key)
@@ -223,9 +255,21 @@ fn encode(
         .collect::<Result<Vec<_>, _>>()?;
     let (stop_reason, exit_code, fault) = match &result.stop {
         memory::StopReason::Idle => (Stop::Idle, None, None),
-        memory::StopReason::Exit(code) => (Stop::Exit, Some(*code), None),
-        memory::StopReason::EventLimit | memory::StopReason::TickLimit => {
-            (Stop::EventLimit, None, None)
+        memory::StopReason::Exit(code) => {
+            let failed = cpu
+                .and_then(Cpu::experiment)
+                .and_then(crate::experiment::Experiment::exit)
+                .is_some_and(|exit| exit.failed);
+            (
+                if failed { Stop::Fail } else { Stop::Exit },
+                Some(*code),
+                None,
+            )
+        }
+        memory::StopReason::EventLimit => (Stop::EventLimit, None, None),
+        memory::StopReason::TickLimit => (Stop::TickLimit, None, None),
+        memory::StopReason::SourceStopped { .. } if cpu.is_some_and(Cpu::instruction_limit) => {
+            (Stop::InstructionLimit, None, None)
         }
         memory::StopReason::SourceStopped { source, reason } => {
             let Some(details) = cpu.and_then(Cpu::fault) else {
@@ -248,8 +292,12 @@ fn encode(
         exit_code,
         fault,
         transactions,
-        commits,
+        commits: if trace { commits } else { &[] },
         stats,
+        console,
+        regions: cpu
+            .and_then(Cpu::experiment)
+            .map_or(&[], crate::experiment::Experiment::regions),
     })
     .context(EncodeSnafu)
 }
@@ -267,7 +315,10 @@ enum Stop {
     Idle,
     Exit,
     EventLimit,
+    TickLimit,
+    InstructionLimit,
     Fault,
+    Fail,
 }
 #[derive(Serialize)]
 struct Fault<'a> {
@@ -284,4 +335,6 @@ struct Report<'a> {
     transactions: Vec<Transaction<'a>>,
     commits: &'a [crate::cpu::Commit],
     stats: Stats,
+    console: Vec<crate::console::Byte>,
+    regions: &'a [crate::experiment::Region],
 }

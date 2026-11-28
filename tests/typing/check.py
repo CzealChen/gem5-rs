@@ -74,6 +74,9 @@ def main() -> None:
         corrected = corrected.replace(
             "router.inputs[0], banks.input", "router.outputs[0], banks.input"
         )
+        corrected = corrected.replace(
+            "one.requests, console)", "one.requests, console.input)"
+        )
         case.write_text(corrected, encoding="utf-8")
         _check_clean(_mypy(mypy, interpreter, case))
 

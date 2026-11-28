@@ -47,3 +47,14 @@ devenv shell -- just check-mvp
 
 第二条包含安装 wheel 后的配置测试和 `mypy --strict`。完整 AM 的 CI、guest
 编译、流式差分和组合报告需在后续阶段加入，当前检查不可称为 AM benchmark 通过。
+
+## 实施顺序调整：当前阻塞核优先
+
+用户后续明确选择先在当前 Blocking CPU 接入 benchmark，guest 使用 Makefile，
+不再以 P2 M0–M4 为本次前置门槛。原计划的长期模块方向保留；本次实现复用当前
+Source/MemoryTarget 接口，不新增 CPU 或事件内核副本。
+
+当前已实现共享 m5 ABI、独立实验控制器、提交时退出与 ROI、正常事务路径上的
+输出设备及类型化 Board 配置/结果。设备新增通用 accepted 通知，以区分字符
+产生与响应完成；既有 RAM 完成时读写语义不变。指令、tick 和 event 预算分别
+报告，m5_fail 保留完整失败码，普通 EBREAK/ECALL 不变。

@@ -18,6 +18,7 @@ from ._types import (
     RunLimit,
     RunResult,
     Rv64Core,
+    SimpleUart,
     TargetHandle,
     TargetIn,
     Traffic,
@@ -25,7 +26,7 @@ from ._types import (
 )
 from ._wire import decode_result
 
-type _Model = Traffic | FixedRam | DualBankRam | Exit | Rv64Core | Router
+type _Model = Traffic | FixedRam | DualBankRam | Exit | SimpleUart | Rv64Core | Router
 type _Handle = RequestorHandle | TargetHandle | RouterHandle
 
 _graph_ids = count(1)
@@ -70,12 +71,26 @@ def _node(model: _Model) -> dict[str, object]:
             }
         case Exit(addr, width_bytes):
             return {"kind": "exit", "addr": addr, "width_bytes": width_bytes}
-        case Rv64Core(elf, stack_pointer, cycle):
+        case SimpleUart(addr, size_bytes, latency):
+            return {
+                "kind": "simple_uart",
+                "addr": addr,
+                "size_bytes": size_bytes,
+                "latency": latency,
+            }
+        case Rv64Core(elf, stack_pointer, cycle, experiment, stack_bytes):
             return {
                 "kind": "rv64_core",
                 "elf": list(elf),
                 "stack_pointer": stack_pointer,
                 "cycle": cycle,
+                "experiment": None
+                if experiment is None
+                else {
+                    "tick_femtoseconds": experiment.tick_femtoseconds,
+                    "instruction_budget": experiment.instruction_budget,
+                },
+                "stack_bytes": stack_bytes,
             }
         case Router(inputs, ranges, priority):
             return {
@@ -108,7 +123,10 @@ class Board:
 
     @overload
     def add(
-        self, model: FixedRam | DualBankRam | Exit, *, name: str | None = None
+        self,
+        model: FixedRam | DualBankRam | Exit | SimpleUart,
+        *,
+        name: str | None = None,
     ) -> TargetHandle: ...
 
     @overload
@@ -170,7 +188,11 @@ class _Machine:
             raise _native.ConfigurationError(
                 "RunLimit.events must fit an unsigned 64-bit count"
             )
-        payload = self._configuration.run(limit.events)
+        if not 0 <= limit.ticks <= (1 << 64) - 1:
+            raise _native.ConfigurationError(
+                "RunLimit.ticks must fit an unsigned 64-bit count"
+            )
+        payload = self._configuration.run(limit.events, limit.ticks, limit.trace)
         try:
             return decode_result(payload)
         except (KeyError, ValueError, TypeError) as error:

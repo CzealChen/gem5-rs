@@ -63,7 +63,15 @@ impl Configuration {
         Ok(Self(Graph::parse(json)?.plan()?))
     }
     pub fn run(&self, events: u64) -> Result<String, RunError> {
-        run::run(&self.0, events)
+        self.run_with_options(events, u64::MAX, true)
+    }
+    pub fn run_with_options(
+        &self,
+        events: u64,
+        ticks: u64,
+        trace: bool,
+    ) -> Result<String, RunError> {
+        run::run(&self.0, events, ticks, trace)
     }
 }
 

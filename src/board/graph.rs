@@ -34,6 +34,10 @@ enum Model {
         elf: Vec<u8>,
         stack_pointer: u64,
         cycle: u64,
+        #[serde(default)]
+        experiment: Option<crate::experiment::Config>,
+        #[serde(default = "default_stack")]
+        stack_bytes: u64,
     },
     FixedRam {
         size_bytes: u64,
@@ -48,6 +52,11 @@ enum Model {
     Exit {
         addr: u64,
         width_bytes: u64,
+    },
+    SimpleUart {
+        addr: u64,
+        size_bytes: u64,
+        latency: u64,
     },
     Router {
         inputs: u64,
@@ -111,6 +120,7 @@ pub(super) enum Source {
         image: elf::Image,
         stack_pointer: u64,
         cycle: u64,
+        experiment: Option<crate::experiment::Config>,
     },
 }
 
@@ -123,9 +133,22 @@ pub(super) struct Scheduled {
 }
 
 pub(super) struct Mount {
-    pub route: memory::Route,
+    pub target: MountTarget,
     pub label: String,
     range: Range<u64>,
+}
+
+pub(super) enum MountTarget {
+    Memory(memory::Route),
+    Console {
+        base: u64,
+        size: usize,
+        latency: std::num::NonZeroU64,
+    },
+}
+
+fn default_stack() -> u64 {
+    16
 }
 
 impl Graph {
@@ -336,6 +359,8 @@ impl Graph {
                         elf,
                         stack_pointer,
                         cycle,
+                        experiment,
+                        stack_bytes,
                     } => {
                         if std::mem::replace(&mut has_core, true) {
                             return Err(ConfigError::from(format!(
@@ -348,13 +373,16 @@ impl Graph {
                             )));
                         }
                         Source::Core {
-                            image: image(elf, *stack_pointer, &routes)
+                            image: image(elf, *stack_pointer, *stack_bytes, &routes)
                                 .map_err(Box::new)
                                 .with_context(|_| ContextSnafu {
                                     location: label.clone(),
                                 })?,
                             stack_pointer: *stack_pointer,
                             cycle: *cycle,
+                            experiment: experiment
+                                .map(crate::experiment::Config::validate)
+                                .transpose()?,
                         }
                     }
                     _ => unreachable!(),
@@ -467,6 +495,30 @@ impl Node {
                 .ok_or_else(|| err("size_bytes exceeds the platform allocation limit".into()))
         };
         let router_base = window.map_or(0, |(window, _)| window.start);
+        if let Model::SimpleUart {
+            addr,
+            size_bytes,
+            latency,
+        } = self.model
+        {
+            let latency = std::num::NonZeroU64::new(latency)
+                .ok_or_else(|| err("latency must be positive".into()))?;
+            let size = positive(size_bytes, "size_bytes")?;
+            if let Some((window, _)) = window
+                && (window.start, window.size_bytes) != (addr, size_bytes)
+            {
+                return Err(err("console window must match target range".into()));
+            }
+            return Ok(Mount {
+                target: MountTarget::Console {
+                    base: addr,
+                    size,
+                    latency,
+                },
+                range: address_range(addr, size_bytes).map_err(err)?,
+                label,
+            });
+        }
         let (base, size, target) = match self.model {
             Model::FixedRam {
                 size_bytes,
@@ -529,7 +581,7 @@ impl Node {
         }
         let range = address_range(base, size).map_err(err)?;
         Ok(Mount {
-            route: memory::Route { base, target },
+            target: MountTarget::Memory(memory::Route { base, target }),
             range,
             label,
         })
@@ -575,21 +627,35 @@ fn address_range(base: u64, size: u64) -> Result<Range<u64>, String> {
     Ok(base..end)
 }
 
-fn image(bytes: &[u8], sp: u64, routes: &[Mount]) -> Result<elf::Image, ConfigError> {
+fn image(
+    bytes: &[u8],
+    sp: u64,
+    stack_bytes: u64,
+    routes: &[Mount],
+) -> Result<elf::Image, ConfigError> {
     const STACK_ALIGNMENT: u64 = 16;
     let bottom = sp
-        .checked_sub(STACK_ALIGNMENT)
-        .filter(|_| sp.is_multiple_of(STACK_ALIGNMENT))
+        .checked_sub(stack_bytes)
+        .filter(|_| {
+            stack_bytes > 0
+                && stack_bytes.is_multiple_of(STACK_ALIGNMENT)
+                && sp.is_multiple_of(STACK_ALIGNMENT)
+        })
         .ok_or("stack_pointer needs one aligned 16-byte stack slot")?;
     let ram = routes
         .iter()
         .find(|mount| {
-            !matches!(mount.route.target, memory::Target::ExitMmio { .. })
-                && mount.range.start <= bottom
+            matches!(
+                mount.target,
+                MountTarget::Memory(memory::Route {
+                    target: memory::Target::FixedRam { .. } | memory::Target::BankedRam { .. },
+                    ..
+                })
+            ) && mount.range.start <= bottom
                 && sp <= mount.range.end
         })
         .ok_or("stack_pointer must have stack space in connected RAM")?;
-    elf::load_at(bytes, ram.range.clone(), sp, STACK_ALIGNMENT).with_context(|_| ImageSnafu {
+    elf::load_at(bytes, ram.range.clone(), sp, stack_bytes).with_context(|_| ImageSnafu {
         location: ram.label.clone(),
     })
 }

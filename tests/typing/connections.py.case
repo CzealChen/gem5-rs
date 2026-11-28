@@ -1,4 +1,4 @@
-from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, Tick, Traffic
+from gem5rs import Address, AddressRange, Board, DualBankRam, FixedRam, Router, SimpleUart, Tick, Traffic
 
 
 def assemble() -> None:
@@ -10,3 +10,5 @@ def assemble() -> None:
     router = board.add(Router(1, [AddressRange(Address(0), 64)]))
     board.connect(one.requests, two.requests)  # error: Argument 2 to "connect" of "Board" has incompatible type "RequestOut"; expected "TargetIn"
     board.connect(router.inputs[0], banks.input)  # error: Argument 1 to "connect" of "Board" has incompatible type "TargetIn"; expected "RequestOut"
+    console = board.add(SimpleUart(Address(4096), 4096, Tick(3)))
+    board.connect(one.requests, console)  # error: Argument 2 to "connect" of "Board" has incompatible type "TargetHandle"; expected "TargetIn"

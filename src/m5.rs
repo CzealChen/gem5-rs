@@ -20,6 +20,11 @@ pub enum Operation {
 }
 
 impl Operation {
+    pub fn decode(instruction: u32) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|op| op.instruction() == instruction)
+    }
     pub const ALL: [Self; 5] = [
         Self::Rpns,
         Self::Exit,

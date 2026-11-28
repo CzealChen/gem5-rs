@@ -5,7 +5,9 @@ from ._types import (
     AccessKind,
     Address,
     Commit,
+    ConsoleByte,
     Fault,
+    Region,
     RegisterWrite,
     RunResult,
     Statistics,
@@ -120,4 +122,21 @@ def decode_result(payload: str) -> RunResult:
         transactions=tuple(_transaction(tx) for tx in _items(result["transactions"])),
         commits=tuple(_commit(step) for step in _items(result["commits"])),
         stats=_statistics(result["stats"]),
+        console=tuple(_console(byte) for byte in _items(result.get("console", []))),
+        regions=tuple(_region(region) for region in _items(result.get("regions", []))),
+    )
+
+
+def _console(value: object) -> ConsoleByte:
+    byte = _record(value)
+    return ConsoleByte(Tick(_uint(byte["at"])), _uint(byte["value"], 255))
+
+
+def _region(value: object) -> Region:
+    region = _record(value)
+    return Region(
+        _uint(region["id"]),
+        Tick(_uint(region["begin_tick"])),
+        Tick(_uint(region["end_tick"])),
+        _uint(region["committed"]),
     )

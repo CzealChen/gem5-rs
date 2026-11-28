@@ -15,6 +15,7 @@ from gem5rs import (
     RouterHandle,
     RunLimit,
     Rv64Core,
+    SimpleUart,
     Statistics,
     StopReason,
     TargetHandle,
@@ -32,6 +33,14 @@ def experiment() -> tuple[int, ...]:
     board.connect(src.requests, ram.input)
     result = board.build().run(RunLimit(events=100))
     return tuple(int(tx.completed_at) for tx in result.transactions)
+
+
+def console_assembly() -> None:
+    board = Board()
+    source = board.add(Traffic([Write(Tick(0), Address(4096), b"A")]))
+    console = board.add(SimpleUart(Address(4096), 4096, Tick(3)))
+    assert_type(console, TargetHandle)
+    board.connect(source.requests, console.input)
 
 
 def assemble(elf: bytes) -> None:
