@@ -1,5 +1,37 @@
 # MicroBench
 
+## 在 gem5-rs 中运行（本项目适配）
+
+在 **gem5-rs 仓库根目录**执行，进入已有的 devenv/uv 环境并安装当前版本：
+
+```sh
+devenv shell
+maturin develop --release
+```
+
+不开 difftest，运行完整 10 项 `test`：
+
+```sh
+python -m tools.am_benchmark --workload microbench --display --output target/am-results/test.json
+```
+
+difftest 默认关闭；需要与 Spike 逐指令比较时，加上 `--difftest`：
+
+```sh
+python -m tools.am_benchmark --workload microbench --difftest --display --output target/am-results/test-difftest.json
+```
+
+这两个命令均通过 Makefile 编译 RV64I/LP64 guest，在当前 blocking CPU 上运行
+qsort、queen、bf、fib、sieve、15pz、dinic、lzip、ssort、md5，并检查每项的上游
+校验结果。当前适配固定使用 `test` 输入；内存不足、缺项或校验失败均视为失败。
+`--display` 显示 guest 输出，JSON 文件保存每项结果、ROI 和仿真统计。
+
+只编译可使用 `python -m tools.am_benchmark --workload microbench --build-only`。
+完整验收命令 `just check-am` 包含 difftest，不是关闭 difftest 的单次运行入口。
+平台与适配细节见 [AM 运行说明](../../../workloads/am/README.md)。
+
+以下为上游使用说明，其中默认 `ref`、跳过内存不足项目等行为属于上游 runner。
+
 CPU正确性和性能测试用基准程序。对AbstractMachine的要求：
 
 1. 需要实现TRM和IOE的API。
